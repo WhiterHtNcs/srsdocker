@@ -11,6 +11,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -31,6 +32,13 @@ RULES_DAT_DIR = BASE_DIR / "rules-dat"
 SING_BOX_PATH = Path(os.environ.get("SING_BOX_PATH", str(BASE_DIR / "bin" / ("sing-box.exe" if os.name == "nt" else "sing-box"))))
 CRON_FILE = Path(os.environ.get("CRON_FILE", "/etc/cron.d/singbox-srs-generator"))
 APP_PORT = 9044
+MAX_JSON_BODY_BYTES = 1024 * 1024
+
+CONFIG_LOCK = threading.RLock()
+RULES_LOCK = threading.RLock()
+RULES_DAT_LOCK = threading.RLock()
+GENERATE_LOCK = threading.Lock()
+REMOTE_UPDATE_LOCK = threading.Lock()
 
 
 DEFAULT_CONFIG = {
@@ -64,17 +72,18 @@ def ensure_directories():
 
 
 def load_stored_config():
-    if not CONFIG_PATH.exists():
-        save_config(DEFAULT_CONFIG)
-        return dict(DEFAULT_CONFIG)
+    with CONFIG_LOCK:
+        if not CONFIG_PATH.exists():
+            save_config(DEFAULT_CONFIG)
+            return dict(DEFAULT_CONFIG)
 
-    with CONFIG_PATH.open("r", encoding="utf-8") as file:
-        data = json.load(file)
+        with CONFIG_PATH.open("r", encoding="utf-8") as file:
+            data = json.load(file)
 
-    config = dict(DEFAULT_CONFIG)
-    config.update(data)
-    config.pop("web_port", None)
-    return config
+        config = dict(DEFAULT_CONFIG)
+        config.update(data)
+        config.pop("web_port", None)
+        return config
 
 
 def load_config():
@@ -98,11 +107,28 @@ def apply_environment_overrides(config):
 
 
 def save_config(config):
-    config = dict(config)
-    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with CONFIG_PATH.open("w", encoding="utf-8") as file:
-        json.dump(config, file, indent=2, ensure_ascii=False)
-        file.write("\n")
+    with CONFIG_LOCK:
+        config = dict(config)
+        CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        temp_fd, temp_name = tempfile.mkstemp(
+            prefix=f".{CONFIG_PATH.name}.",
+            suffix=".tmp",
+            dir=str(CONFIG_PATH.parent),
+        )
+        os.close(temp_fd)
+        temp_path = Path(temp_name)
+
+        try:
+            with temp_path.open("w", encoding="utf-8") as file:
+                json.dump(config, file, indent=2, ensure_ascii=False)
+                file.write("\n")
+            os.replace(temp_path, CONFIG_PATH)
+        finally:
+            try:
+                if temp_path.exists():
+                    temp_path.unlink()
+            except OSError:
+                pass
 
 
 def public_config(config):
@@ -183,27 +209,28 @@ def get_rules_dat_json_path(kind, code):
 
 
 def list_rules():
-    rules = []
-    for path in RULES_DIR.glob("*.txt"):
-        if not path.is_file():
-            continue
+    with RULES_LOCK:
+        rules = []
+        for path in RULES_DIR.glob("*.txt"):
+            if not path.is_file():
+                continue
 
-        stat = path.stat()
-        created = getattr(stat, "st_birthtime", stat.st_ctime)
-        created_ns = getattr(stat, "st_birthtime_ns", stat.st_ctime_ns)
-        rules.append(
-            {
-                "name": path.stem,
-                "filename": path.name,
-                "content": path.read_text(encoding="utf-8"),
-                "size": stat.st_size,
-                "created": created,
-                "created_ns": created_ns,
-                "modified": stat.st_mtime,
-            }
-        )
+            stat = path.stat()
+            created = getattr(stat, "st_birthtime", stat.st_ctime)
+            created_ns = getattr(stat, "st_birthtime_ns", stat.st_ctime_ns)
+            rules.append(
+                {
+                    "name": path.stem,
+                    "filename": path.name,
+                    "content": path.read_text(encoding="utf-8"),
+                    "size": stat.st_size,
+                    "created": created,
+                    "created_ns": created_ns,
+                    "modified": stat.st_mtime,
+                }
+            )
 
-    return sorted(rules, key=lambda rule: (rule["created_ns"], rule["filename"].lower()))
+        return sorted(rules, key=lambda rule: (rule["created_ns"], rule["filename"].lower()))
 
 
 def list_srs_files():
@@ -240,29 +267,30 @@ def list_srs_files():
 
 
 def get_remote_rule_files():
-    files = {}
-    for kind in ("geosite", "geoip"):
-        directory = RULES_DAT_DIR / kind
-        items = []
-        for path in sorted(directory.glob("*.json"), key=lambda item: item.name.lower()):
-            if not path.is_file():
-                continue
-            stat = path.stat()
-            items.append(
-                {
-                    "name": path.stem,
-                    "filename": path.name,
-                    "path": str(path),
-                    "size": stat.st_size,
-                    "modified": stat.st_mtime,
-                }
-            )
-        files[kind] = {
-            "path": str(directory),
-            "count": len(items),
-            "items": items,
-        }
-    return files
+    with RULES_DAT_LOCK:
+        files = {}
+        for kind in ("geosite", "geoip"):
+            directory = RULES_DAT_DIR / kind
+            items = []
+            for path in sorted(directory.glob("*.json"), key=lambda item: item.name.lower()):
+                if not path.is_file():
+                    continue
+                stat = path.stat()
+                items.append(
+                    {
+                        "name": path.stem,
+                        "filename": path.name,
+                        "path": str(path),
+                        "size": stat.st_size,
+                        "modified": stat.st_mtime,
+                    }
+                )
+            files[kind] = {
+                "path": str(directory),
+                "count": len(items),
+                "items": items,
+            }
+        return files
 
 
 def validate_download_url(url):
@@ -550,6 +578,11 @@ def collect_required_geo_rules():
 
 
 def update_remote_rules(config=None):
+    with REMOTE_UPDATE_LOCK:
+        return _update_remote_rules(config)
+
+
+def _update_remote_rules(config=None):
     config = config or load_config()
     github_token = config.get("github_token", "")
     targets = {
@@ -583,31 +616,32 @@ def update_remote_rules(config=None):
 
         try:
             base_url = config.get(config_key, "")
-            for code in codes:
-                try:
-                    downloaded.append(download_rules_dat_rule_file(base_url, name, code, github_token=github_token))
-                except urllib.error.HTTPError as error:
-                    if error.code == 404:
-                        skipped.append(
-                            {
-                                "name": code,
-                                "error": "remote JSON rule not found",
-                            }
-                        )
-                    else:
+            with RULES_DAT_LOCK:
+                for code in codes:
+                    try:
+                        downloaded.append(download_rules_dat_rule_file(base_url, name, code, github_token=github_token))
+                    except urllib.error.HTTPError as error:
+                        if error.code == 404:
+                            skipped.append(
+                                {
+                                    "name": code,
+                                    "error": "remote JSON rule not found",
+                                }
+                            )
+                        else:
+                            failed.append(
+                                {
+                                    "name": code,
+                                    "error": str(error),
+                                }
+                            )
+                    except (ValueError, OSError, urllib.error.URLError, TimeoutError, json.JSONDecodeError) as error:
                         failed.append(
                             {
                                 "name": code,
                                 "error": str(error),
                             }
                         )
-                except (ValueError, OSError, urllib.error.URLError, TimeoutError, json.JSONDecodeError) as error:
-                    failed.append(
-                        {
-                            "name": code,
-                            "error": str(error),
-                        }
-                    )
 
             results[name] = {
                 "ok": not failed and not skipped,
@@ -684,15 +718,16 @@ def sync_cron_file(config):
 def load_rules_dat_rule(kind, code, line_number=None):
     normalized, path = get_rules_dat_json_path(kind, code)
 
-    if not path.exists() or not path.is_file():
-        prefix = f"Line {line_number}: " if line_number is not None else ""
-        raise ValueError(f"{prefix}{kind}:{normalized} not found in rules-dat. Run remote update first.")
+    with RULES_DAT_LOCK:
+        if not path.exists() or not path.is_file():
+            prefix = f"Line {line_number}: " if line_number is not None else ""
+            raise ValueError(f"{prefix}{kind}:{normalized} not found in rules-dat. Run remote update first.")
 
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as error:
-        prefix = f"Line {line_number}: " if line_number is not None else ""
-        raise ValueError(f"{prefix}{path.name} is not valid JSON: {error}") from error
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as error:
+            prefix = f"Line {line_number}: " if line_number is not None else ""
+            raise ValueError(f"{prefix}{path.name} is not valid JSON: {error}") from error
 
     rules = data.get("rules")
     if not isinstance(rules, list):
@@ -852,11 +887,9 @@ def convert_to_singbox_json(rule_lines):
     }
 
 
-def convert_to_srs(rule_lines):
+def compile_singbox_json_to_srs(singbox_json):
     if not SING_BOX_PATH.exists():
         raise RuleConversionError("sing-box binary not found.", {"command": [str(SING_BOX_PATH)]})
-
-    singbox_json = convert_to_singbox_json(rule_lines)
 
     ensure_directories()
     json_fd, temp_json_name = tempfile.mkstemp(prefix=".srs-build-", suffix=".json", dir=str(RULE_SET_DIR))
@@ -911,30 +944,67 @@ def convert_to_srs(rule_lines):
                 pass
 
 
+def convert_to_srs(rule_lines):
+    return compile_singbox_json_to_srs(convert_to_singbox_json(rule_lines))
+
+
 def generate_rule_by_name(name):
-    normalized_name, rule_path = get_rule_path(name)
-    _, json_path, srs_path = get_srs_paths(normalized_name)
+    with GENERATE_LOCK:
+        normalized_name, rule_path = get_rule_path(name)
+        _, json_path, srs_path = get_srs_paths(normalized_name)
 
-    if not rule_path.exists() or not rule_path.is_file():
-        raise FileNotFoundError("Rule not found.")
+        with RULES_LOCK:
+            if not rule_path.exists() or not rule_path.is_file():
+                raise FileNotFoundError("Rule not found.")
+            rule_lines = rule_path.read_text(encoding="utf-8").splitlines()
 
-    rule_lines = rule_path.read_text(encoding="utf-8").splitlines()
-    singbox_json = convert_to_singbox_json(rule_lines)
-    json_path.write_text(json.dumps(singbox_json, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        with RULES_DAT_LOCK:
+            singbox_json = convert_to_singbox_json(rule_lines)
 
-    srs_result = convert_to_srs(rule_lines)
-    srs_path.write_bytes(srs_result.pop("content"))
+        srs_result = compile_singbox_json_to_srs(singbox_json)
+        srs_content = srs_result.pop("content")
 
-    return {
-        "ok": True,
-        "rule": {"name": normalized_name, "filename": rule_path.name},
-        "outputs": {
-            "json": str(json_path.relative_to(BASE_DIR)),
-            "srs": str(srs_path.relative_to(BASE_DIR)),
-        },
-        "singbox_json": singbox_json,
-        "execution": srs_result,
-    }
+        json_fd, temp_json_name = tempfile.mkstemp(
+            prefix=f".{json_path.name}.",
+            suffix=".tmp",
+            dir=str(json_path.parent),
+        )
+        srs_fd, temp_srs_name = tempfile.mkstemp(
+            prefix=f".{srs_path.name}.",
+            suffix=".tmp",
+            dir=str(srs_path.parent),
+        )
+        os.close(json_fd)
+        os.close(srs_fd)
+        temp_json_path = Path(temp_json_name)
+        temp_srs_path = Path(temp_srs_name)
+
+        try:
+            temp_json_path.write_text(
+                json.dumps(singbox_json, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            temp_srs_path.write_bytes(srs_content)
+            os.replace(temp_json_path, json_path)
+            os.replace(temp_srs_path, srs_path)
+        finally:
+            for path in (temp_json_path, temp_srs_path):
+                try:
+                    if path.exists():
+                        path.unlink()
+                except OSError:
+                    pass
+
+        return {
+            "ok": True,
+            "rule": {"name": normalized_name, "filename": rule_path.name},
+            "outputs": {
+                "json": str(json_path.relative_to(BASE_DIR)),
+                "srs": str(srs_path.relative_to(BASE_DIR)),
+            },
+            "singbox_json": singbox_json,
+            "execution": srs_result,
+        }
 
 
 class AppHandler(SimpleHTTPRequestHandler):
@@ -1052,11 +1122,12 @@ class AppHandler(SimpleHTTPRequestHandler):
             self.send_json({"error": str(error)}, status=HTTPStatus.BAD_REQUEST)
             return
 
-        if rule_path.exists():
-            self.send_json({"error": "Rule already exists."}, status=HTTPStatus.CONFLICT)
-            return
+        with RULES_LOCK:
+            if rule_path.exists():
+                self.send_json({"error": "Rule already exists."}, status=HTTPStatus.CONFLICT)
+                return
 
-        rule_path.write_text(content, encoding="utf-8")
+            rule_path.write_text(content, encoding="utf-8")
         self.send_json({"ok": True, "rule": {"name": name, "filename": rule_path.name}}, status=HTTPStatus.CREATED)
 
     def handle_rule_update(self):
@@ -1075,11 +1146,12 @@ class AppHandler(SimpleHTTPRequestHandler):
             self.send_json({"error": str(error)}, status=HTTPStatus.BAD_REQUEST)
             return
 
-        if not rule_path.exists() or not rule_path.is_file():
-            self.send_json({"error": "Rule not found."}, status=HTTPStatus.NOT_FOUND)
-            return
+        with RULES_LOCK:
+            if not rule_path.exists() or not rule_path.is_file():
+                self.send_json({"error": "Rule not found."}, status=HTTPStatus.NOT_FOUND)
+                return
 
-        rule_path.write_text(content, encoding="utf-8")
+            rule_path.write_text(content, encoding="utf-8")
         self.send_json({"ok": True, "rule": {"name": name, "filename": rule_path.name}})
 
     def handle_rule_delete(self):
@@ -1093,11 +1165,12 @@ class AppHandler(SimpleHTTPRequestHandler):
             self.send_json({"error": str(error)}, status=HTTPStatus.BAD_REQUEST)
             return
 
-        if not rule_path.exists() or not rule_path.is_file():
-            self.send_json({"error": "Rule not found."}, status=HTTPStatus.NOT_FOUND)
-            return
+        with RULES_LOCK:
+            if not rule_path.exists() or not rule_path.is_file():
+                self.send_json({"error": "Rule not found."}, status=HTTPStatus.NOT_FOUND)
+                return
 
-        rule_path.unlink()
+            rule_path.unlink()
         self.send_json({"ok": True, "rule": {"name": name, "filename": rule_path.name}})
 
     def handle_generate(self):
@@ -1175,12 +1248,32 @@ class AppHandler(SimpleHTTPRequestHandler):
             self.send_json({"error": "Invalid Content-Length"}, status=HTTPStatus.BAD_REQUEST)
             return None
 
+        if length < 0:
+            self.send_json({"error": "Invalid Content-Length"}, status=HTTPStatus.BAD_REQUEST)
+            return None
+
+        if length > MAX_JSON_BODY_BYTES:
+            self.send_json(
+                {
+                    "error": "JSON body is too large.",
+                    "max_bytes": MAX_JSON_BODY_BYTES,
+                },
+                status=HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+            )
+            return None
+
         raw_body = self.rfile.read(length) if length > 0 else b"{}"
         try:
-            return json.loads(raw_body.decode("utf-8"))
+            payload = json.loads(raw_body.decode("utf-8"))
         except json.JSONDecodeError:
             self.send_json({"error": "Invalid JSON body"}, status=HTTPStatus.BAD_REQUEST)
             return None
+
+        if not isinstance(payload, dict):
+            self.send_json({"error": "JSON body must be an object."}, status=HTTPStatus.BAD_REQUEST)
+            return None
+
+        return payload
 
     def send_json(self, payload, status=HTTPStatus.OK):
         body = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
