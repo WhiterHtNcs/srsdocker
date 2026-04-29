@@ -2,6 +2,7 @@
 set -eu
 
 mkdir -p /app/rules /app/rules-dat/geosite /app/rules-dat/geoip /app/rule-set/srs
+chmod +x /app/bin/sing-box 2>/dev/null || true
 
 CRON_FILE=/etc/cron.d/singbox-srs-generator
 
