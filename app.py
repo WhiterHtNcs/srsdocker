@@ -74,6 +74,7 @@ def load_stored_config():
     config = dict(DEFAULT_CONFIG)
     config.update(data)
     config.pop("web_port", None)
+    config["github_token"] = ""
     return config
 
 
@@ -98,6 +99,8 @@ def apply_environment_overrides(config):
 
 
 def save_config(config):
+    config = dict(config)
+    config["github_token"] = ""
     with CONFIG_PATH.open("w", encoding="utf-8") as file:
         json.dump(config, file, indent=2, ensure_ascii=False)
         file.write("\n")
@@ -107,6 +110,7 @@ def public_config(config):
     public = dict(config)
     token = public.pop("github_token", "")
     public["github_token_configured"] = bool(token)
+    public["github_token_source"] = "environment" if os.environ.get("GITHUB_TOKEN") else "none"
     public["config_path"] = str(CONFIG_PATH)
     return public
 
@@ -942,7 +946,7 @@ class AppHandler(SimpleHTTPRequestHandler):
         parsed = urlparse(self.path)
 
         if parsed.path == "/api/config":
-            self.send_json(public_config(load_stored_config()))
+            self.send_json(public_config(load_config()))
             return
 
         if parsed.path == "/api/rules":
@@ -975,15 +979,6 @@ class AppHandler(SimpleHTTPRequestHandler):
                 for key in ("geosite_url", "geoip_url"):
                     if key in payload:
                         config[key] = payload[key]
-
-                if "github_token" in payload:
-                    github_token = payload["github_token"]
-                    if not isinstance(github_token, str):
-                        raise ValueError("GitHub token must be a string.")
-                    if github_token.strip():
-                        config["github_token"] = github_token.strip()
-                    elif payload.get("clear_github_token"):
-                        config["github_token"] = ""
 
                 if "auto_update_enabled" in payload:
                     config["auto_update_enabled"] = bool(payload["auto_update_enabled"])

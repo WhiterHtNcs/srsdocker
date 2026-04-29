@@ -274,13 +274,9 @@
       <input id="geoipUrl" type="url" placeholder="https://api.github.com/repos/MetaCubeX/meta-rules-dat/contents/geo/geoip?ref=sing">
       <p class="hint">默认：MetaCubeX/meta-rules-dat 的 sing 分支 geoip JSON 目录。也可以填写 GitHub 页面目录地址，后端会自动转成 API 地址。</p>
 
-      <label for="githubToken">GitHub Personal Access Token</label>
-      <input id="githubToken" type="password" autocomplete="off" placeholder="留空则保持当前 token 不变">
-
-      <label class="check-row" for="clearGithubToken">
-        <input id="clearGithubToken" type="checkbox">
-        清除已保存的 GitHub token
-      </label>
+      <label>GitHub Personal Access Token</label>
+      <p id="githubTokenStatus" class="hint">未检测到 GITHUB_TOKEN 环境变量。</p>
+      <p class="hint">GitHub token 只通过 Docker 环境变量 GITHUB_TOKEN 配置，config.json 中保持为空。</p>
 
       <label class="check-row" for="autoUpdateEnabled">
         <input id="autoUpdateEnabled" type="checkbox">
@@ -302,8 +298,7 @@
   <script>
     const geositeUrl = document.querySelector("#geositeUrl");
     const geoipUrl = document.querySelector("#geoipUrl");
-    const githubToken = document.querySelector("#githubToken");
-    const clearGithubToken = document.querySelector("#clearGithubToken");
+    const githubTokenStatus = document.querySelector("#githubTokenStatus");
     const autoUpdateEnabled = document.querySelector("#autoUpdateEnabled");
     const autoUpdateCron = document.querySelector("#autoUpdateCron");
     const remoteOutput = document.querySelector("#remoteOutput");
@@ -364,11 +359,9 @@
       const config = await requestJson("/api/config");
       geositeUrl.value = config.geosite_url || "";
       geoipUrl.value = config.geoip_url || "";
-      githubToken.value = "";
-      githubToken.placeholder = config.github_token_configured
-        ? "已配置 token，留空则保持不变"
-        : "未配置 token";
-      clearGithubToken.checked = false;
+      githubTokenStatus.textContent = config.github_token_configured
+        ? "已检测到 GITHUB_TOKEN 环境变量，下载 GitHub 规则时会自动使用。"
+        : "未检测到 GITHUB_TOKEN 环境变量。";
       autoUpdateEnabled.checked = Boolean(config.auto_update_enabled);
       autoUpdateCron.value = config.auto_update_cron || "0 4 * * *";
     }
@@ -377,15 +370,11 @@
       const payload = {
         geosite_url: geositeUrl.value,
         geoip_url: geoipUrl.value,
-        github_token: githubToken.value,
-        clear_github_token: clearGithubToken.checked,
         auto_update_enabled: autoUpdateEnabled.checked,
         auto_update_cron: autoUpdateCron.value
       };
 
       const result = await postJson("/api/config", payload);
-      githubToken.value = "";
-      clearGithubToken.checked = false;
       setStatus(`配置已保存到 ${result.config_path || "config.json"}。`);
       await loadConfig();
     }
