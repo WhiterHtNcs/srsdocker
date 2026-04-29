@@ -19,7 +19,7 @@ COPY docker/entrypoint.sh /entrypoint.sh
 COPY --from=sing-box /usr/local/bin/sing-box ./bin/sing-box
 
 RUN chmod +x /entrypoint.sh \
-    && chmod +x /app/sing-box \
+    && chmod +x /app/bin/sing-box \
     && mkdir -p /app/config /app/rules /app/rules-dat/geosite /app/rules-dat/geoip /app/rule-set/srs
 
 EXPOSE 9044

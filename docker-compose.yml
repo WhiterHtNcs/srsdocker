@@ -13,5 +13,6 @@ services:
       - /vol1/1000/DockerData/sing-box/rules:/app/rules
       - /vol1/1000/DockerData/sing-box/rules-dat:/app/rules-dat
       - /vol1/1000/DockerData/sing-box/rule-set:/app/rule-set
+      - ./bin:/app/bin
       - ./config:/app/config
     restart: unless-stopped
