@@ -22,7 +22,7 @@ from urllib.parse import urlunparse
 
 
 BASE_DIR = Path(__file__).resolve().parent
-CONFIG_PATH = BASE_DIR / "config.json"
+CONFIG_PATH = Path(os.environ.get("CONFIG_PATH", str(BASE_DIR / "config" / "config.json")))
 WEB_DIR = BASE_DIR / "web"
 RULES_DIR = BASE_DIR / "rules"
 RULE_SET_DIR = BASE_DIR / "rule-set"
@@ -101,6 +101,7 @@ def apply_environment_overrides(config):
 def save_config(config):
     config = dict(config)
     config["github_token"] = ""
+    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
     with CONFIG_PATH.open("w", encoding="utf-8") as file:
         json.dump(config, file, indent=2, ensure_ascii=False)
         file.write("\n")

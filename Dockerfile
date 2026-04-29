@@ -9,7 +9,8 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends cron \
     && rm -rf /var/lib/apt/lists/*
 
-COPY app.py config.json ./
+COPY app.py ./
+COPY config ./config
 COPY web ./web
 COPY rules ./rules
 COPY rules-dat ./rules-dat
@@ -19,7 +20,7 @@ COPY --from=sing-box /usr/local/bin/sing-box ./sing-box
 
 RUN chmod +x /entrypoint.sh \
     && chmod +x /app/sing-box \
-    && mkdir -p /app/rules /app/rules-dat/geosite /app/rules-dat/geoip /app/rule-set/srs
+    && mkdir -p /app/config /app/rules /app/rules-dat/geosite /app/rules-dat/geoip /app/rule-set/srs
 
 EXPOSE 9044
 

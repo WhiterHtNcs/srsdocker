@@ -19,7 +19,9 @@
 ```text
 .
 |-- app.py                 # 后端 HTTP 服务
-|-- config.json            # 配置文件，token 默认保持为空
+|-- config/
+|   |-- config.json        # 配置文件，token 默认保持为空
+|   `-- .env               # Docker 环境变量
 |-- Dockerfile
 |-- docker-compose.yml
 |-- docker/
@@ -50,14 +52,15 @@ http://localhost:9044
 
 默认挂载：
 
-- `./rules:/app/rules`
-- `./rules-dat:/app/rules-dat`
-- `./rule-set:/app/rule-set`
-- `./config.json:/app/config.json`
+- `/vol1/1000/DockerData/sing-box/rules:/app/rules`
+- `/vol1/1000/DockerData/sing-box/rules-dat:/app/rules-dat`
+- `/vol1/1000/DockerData/sing-box/rule-set:/app/rule-set`
+- `./config:/app/config`
+- `./config/.env` 通过 `env_file` 加载
 
 ### 环境变量
 
-可以通过 `.env` 或 shell 环境变量传入：
+可以通过 `config/.env` 传入：
 
 ```env
 GEOSITE_URL=https://api.github.com/repos/MetaCubeX/meta-rules-dat/contents/geo/geosite?ref=sing
@@ -89,7 +92,7 @@ http://localhost:9044
 
 ## 配置
 
-`config.json` 示例：
+`config/config.json` 示例：
 
 ```json
 {

@@ -11,7 +11,7 @@ import os
 import re
 from pathlib import Path
 
-config_path = Path("/app/config.json")
+config_path = Path(os.environ.get("CONFIG_PATH", "/app/config/config.json"))
 config = {}
 if config_path.exists():
     config = json.loads(config_path.read_text(encoding="utf-8"))
