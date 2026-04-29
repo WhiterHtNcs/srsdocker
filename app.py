@@ -74,7 +74,6 @@ def load_stored_config():
     config = dict(DEFAULT_CONFIG)
     config.update(data)
     config.pop("web_port", None)
-    config["github_token"] = ""
     return config
 
 
@@ -100,7 +99,6 @@ def apply_environment_overrides(config):
 
 def save_config(config):
     config = dict(config)
-    config["github_token"] = ""
     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
     with CONFIG_PATH.open("w", encoding="utf-8") as file:
         json.dump(config, file, indent=2, ensure_ascii=False)
@@ -110,8 +108,9 @@ def save_config(config):
 def public_config(config):
     public = dict(config)
     token = public.pop("github_token", "")
-    public["github_token_configured"] = bool(token)
-    public["github_token_source"] = "environment" if os.environ.get("GITHUB_TOKEN") else "none"
+    env_token = os.environ.get("GITHUB_TOKEN", "")
+    public["github_token_configured"] = bool(token or env_token)
+    public["github_token_source"] = "environment" if env_token else ("config" if token else "none")
     public["config_path"] = str(CONFIG_PATH)
     return public
 
@@ -980,6 +979,9 @@ class AppHandler(SimpleHTTPRequestHandler):
                 for key in ("geosite_url", "geoip_url"):
                     if key in payload:
                         config[key] = payload[key]
+
+                if "github_token" in payload:
+                    config["github_token"] = str(payload["github_token"]).strip()
 
                 if "auto_update_enabled" in payload:
                     config["auto_update_enabled"] = bool(payload["auto_update_enabled"])
