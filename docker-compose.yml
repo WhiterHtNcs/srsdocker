@@ -1,33 +1,17 @@
 services:
-  sing-box:
-    image: ghcr.io/sagernet/sing-box
-    container_name: sing-box
-    restart: unless-stopped
-    networks:
-      - singbox
-
   singbox-srs-generator:
     build:
       context: .
       args:
         SING_BOX_IMAGE: ghcr.io/sagernet/sing-box
     container_name: singbox-srs-generator
-    depends_on:
-      - sing-box
     env_file:
       - ./config/.env
     ports:
       - "9044:9044"
-    networks:
-      - singbox
     volumes:
       - /vol1/1000/DockerData/sing-box/rules:/app/rules
       - /vol1/1000/DockerData/sing-box/rules-dat:/app/rules-dat
       - /vol1/1000/DockerData/sing-box/rule-set:/app/rule-set
       - ./config:/app/config
     restart: unless-stopped
-
-networks:
-  singbox:
-    name: singbox
-    driver: bridge

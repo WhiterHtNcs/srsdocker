@@ -16,7 +16,7 @@ COPY rules ./rules
 COPY rules-dat ./rules-dat
 COPY rule-set ./rule-set
 COPY docker/entrypoint.sh /entrypoint.sh
-COPY --from=sing-box /usr/local/bin/sing-box ./sing-box
+COPY --from=sing-box /usr/local/bin/sing-box ./bin/sing-box
 
 RUN chmod +x /entrypoint.sh \
     && chmod +x /app/sing-box \

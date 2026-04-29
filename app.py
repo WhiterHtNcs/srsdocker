@@ -28,7 +28,7 @@ RULES_DIR = BASE_DIR / "rules"
 RULE_SET_DIR = BASE_DIR / "rule-set"
 SRS_DIR = RULE_SET_DIR / "srs"
 RULES_DAT_DIR = BASE_DIR / "rules-dat"
-SING_BOX_PATH = Path(os.environ.get("SING_BOX_PATH", str(BASE_DIR / ("sing-box.exe" if os.name == "nt" else "sing-box"))))
+SING_BOX_PATH = Path(os.environ.get("SING_BOX_PATH", str(BASE_DIR / "bin" / ("sing-box.exe" if os.name == "nt" else "sing-box"))))
 CRON_FILE = Path(os.environ.get("CRON_FILE", "/etc/cron.d/singbox-srs-generator"))
 APP_PORT = 9044
 

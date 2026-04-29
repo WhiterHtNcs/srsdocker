@@ -228,5 +228,5 @@ POST /api/remote/update
 - 项目不使用任何 Python 第三方依赖
 - 规则集名称只允许字母、数字、点、下划线和短横线
 - 前端页面需要通过后端服务访问，不建议直接双击打开 HTML
-- Docker 镜像构建时会从 `ghcr.io/sagernet/sing-box` 拷贝 `sing-box` 二进制
+- Docker 镜像构建时会从 `ghcr.io/sagernet/sing-box` 拷贝 `sing-box` 二进制，运行时不需要单独启动 sing-box 容器
 - 请不要把 GitHub token 写入 `config.json` 或提交到仓库
