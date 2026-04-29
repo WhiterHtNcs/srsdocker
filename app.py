@@ -91,7 +91,7 @@ def apply_environment_overrides(config):
         config["geoip_url"] = geoip_url
 
     github_token = os.environ.get("GITHUB_TOKEN")
-    if github_token:
+    if github_token and github_token.strip():
         config["github_token"] = github_token
 
     return config
@@ -109,8 +109,9 @@ def public_config(config):
     public = dict(config)
     token = public.pop("github_token", "")
     env_token = os.environ.get("GITHUB_TOKEN", "")
-    public["github_token_configured"] = bool(token or env_token)
-    public["github_token_source"] = "environment" if env_token else ("config" if token else "none")
+    env_token_effective = env_token and env_token.strip()
+    public["github_token_configured"] = bool(token or env_token_effective)
+    public["github_token_source"] = "environment" if env_token_effective else ("config" if token else "none")
     public["config_path"] = str(CONFIG_PATH)
     return public
 

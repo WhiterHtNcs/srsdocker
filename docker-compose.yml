@@ -3,6 +3,7 @@ services:
     build:
       context: .
     container_name: singbox-srs-generator
+    network_mode: bridge
     env_file:
       - ./config/.env
     ports:
