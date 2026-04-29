@@ -266,6 +266,43 @@ def list_srs_files():
     return files
 
 
+def write_srs_files_index():
+    ensure_directories()
+    filenames = [
+        path.name
+        for path in sorted(SRS_DIR.glob("*.srs"), key=lambda item: item.name.lower())
+        if path.is_file()
+    ]
+    content = "\n".join(filenames)
+    if content:
+        content += "\n"
+
+    index_path = SRS_DIR / "files.txt"
+    temp_fd, temp_name = tempfile.mkstemp(
+        prefix=f".{index_path.name}.",
+        suffix=".tmp",
+        dir=str(SRS_DIR),
+    )
+    os.close(temp_fd)
+    temp_path = Path(temp_name)
+
+    try:
+        temp_path.write_text(content, encoding="utf-8")
+        os.replace(temp_path, index_path)
+    finally:
+        try:
+            if temp_path.exists():
+                temp_path.unlink()
+        except OSError:
+            pass
+
+    return {
+        "path": str(index_path.relative_to(BASE_DIR)),
+        "count": len(filenames),
+        "files": filenames,
+    }
+
+
 def get_remote_rule_files():
     with RULES_DAT_LOCK:
         files = {}
@@ -987,6 +1024,7 @@ def generate_rule_by_name(name):
             temp_srs_path.write_bytes(srs_content)
             os.replace(temp_json_path, json_path)
             os.replace(temp_srs_path, srs_path)
+            files_index = write_srs_files_index()
         finally:
             for path in (temp_json_path, temp_srs_path):
                 try:
@@ -1004,6 +1042,7 @@ def generate_rule_by_name(name):
             },
             "singbox_json": singbox_json,
             "execution": srs_result,
+            "files_index": files_index,
         }
 
 
