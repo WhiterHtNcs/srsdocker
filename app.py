@@ -592,6 +592,27 @@ def download_rules_dat_rule_file(base_url, kind, code, github_token=None):
     }
 
 
+def collect_geo_rules_from_lines(rule_lines):
+    required = {
+        "geosite": set(),
+        "geoip": set(),
+    }
+
+    for raw_line in rule_lines:
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+
+        geo_reference = parse_geo_reference(line)
+        if not geo_reference:
+            continue
+
+        kind, code = geo_reference
+        required[kind].add(normalize_geo_code(code))
+
+    return required
+
+
 def collect_required_geo_rules():
     required = {
         "geosite": set(),
@@ -599,27 +620,52 @@ def collect_required_geo_rules():
     }
 
     for rule in list_rules():
-        for raw_line in rule["content"].splitlines():
-            line = raw_line.strip()
-            if not line or line.startswith("#"):
-                continue
-
-            geo_reference = parse_geo_reference(line)
-            if not geo_reference:
-                continue
-
-            kind, code = geo_reference
-            required[kind].add(normalize_geo_code(code))
+        rule_required = collect_geo_rules_from_lines(rule["content"].splitlines())
+        for kind in required:
+            required[kind].update(rule_required[kind])
 
     return required
 
 
-def update_remote_rules(config=None):
+def rules_dat_rule_is_complete(kind, code):
+    normalized, path = get_rules_dat_json_path(kind, code)
+
+    if not path.exists() or not path.is_file():
+        return False
+
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return False
+
+    return isinstance(data.get("rules"), list)
+
+
+def collect_incomplete_geo_rules(required):
+    incomplete = {
+        "geosite": set(),
+        "geoip": set(),
+    }
+
+    with RULES_DAT_LOCK:
+        for kind in incomplete:
+            for code in required.get(kind, set()):
+                if not rules_dat_rule_is_complete(kind, code):
+                    incomplete[kind].add(normalize_geo_code(code))
+
+    return incomplete
+
+
+def update_remote_rules(config=None, required=None, missing_only=False):
     with REMOTE_UPDATE_LOCK:
-        return _update_remote_rules(config)
+        return _update_remote_rules(config, required=required, missing_only=missing_only)
 
 
-def _update_remote_rules(config=None):
+def ensure_required_geo_rules(required, config=None):
+    return update_remote_rules(config=config, required=required, missing_only=True)
+
+
+def _update_remote_rules(config=None, required=None, missing_only=False):
     config = config or load_config()
     github_token = config.get("github_token", "")
     targets = {
@@ -627,10 +673,11 @@ def _update_remote_rules(config=None):
         "geoip": "geoip_url",
     }
     results = {}
-    required = collect_required_geo_rules()
+    required = required or collect_required_geo_rules()
+    missing = collect_incomplete_geo_rules(required) if missing_only else None
 
     for name, config_key in targets.items():
-        codes = sorted(required[name])
+        codes = sorted((missing if missing_only else required)[name])
         downloaded = []
         failed = []
         skipped = []
@@ -640,7 +687,8 @@ def _update_remote_rules(config=None):
             results[name] = {
                 "ok": True,
                 "kind": name,
-                "needed_count": 0,
+                "needed_count": len(required.get(name, [])),
+                "download_needed_count": 0,
                 "downloaded_count": 0,
                 "failed_count": 0,
                 "skipped_count": 0,
@@ -685,7 +733,8 @@ def _update_remote_rules(config=None):
                 "kind": name,
                 "url": config.get(config_key, ""),
                 "path": str(RULES_DAT_DIR / name),
-                "needed_count": len(codes),
+                "needed_count": len(required.get(name, [])),
+                "download_needed_count": len(codes),
                 "downloaded_count": len(downloaded),
                 "failed_count": len(failed),
                 "skipped_count": len(skipped),
@@ -700,7 +749,8 @@ def _update_remote_rules(config=None):
                 "kind": name,
                 "url": config.get(config_key, ""),
                 "path": str(RULES_DAT_DIR / name),
-                "needed_count": len(codes),
+                "needed_count": len(required.get(name, [])),
+                "download_needed_count": len(codes),
                 "downloaded_count": len(downloaded),
                 "failed_count": len(failed) + 1,
                 "skipped_count": len(skipped),
@@ -714,6 +764,8 @@ def _update_remote_rules(config=None):
         "ok": all(item.get("ok") for item in results.values()),
         "rules_dat_dir": str(RULES_DAT_DIR),
         "required": {kind: sorted(codes) for kind, codes in required.items()},
+        "missing_only": missing_only,
+        "incomplete": {kind: sorted(codes) for kind, codes in (missing or {}).items()},
         "files": {
             "geosite": "rules-dat/geosite/*.json",
             "geoip": "rules-dat/geoip/*.json",
@@ -985,7 +1037,7 @@ def convert_to_srs(rule_lines):
     return compile_singbox_json_to_srs(convert_to_singbox_json(rule_lines))
 
 
-def generate_rule_by_name(name):
+def generate_rule_by_name(name, ensure_remote_rules=True):
     with GENERATE_LOCK:
         normalized_name, rule_path = get_rule_path(name)
         _, json_path, srs_path = get_srs_paths(normalized_name)
@@ -994,6 +1046,16 @@ def generate_rule_by_name(name):
             if not rule_path.exists() or not rule_path.is_file():
                 raise FileNotFoundError("Rule not found.")
             rule_lines = rule_path.read_text(encoding="utf-8").splitlines()
+
+        remote_update_result = None
+        if ensure_remote_rules:
+            required_geo_rules = collect_geo_rules_from_lines(rule_lines)
+            remote_update_result = ensure_required_geo_rules(required_geo_rules, load_config())
+            if not remote_update_result["ok"]:
+                raise RuleConversionError(
+                    "Referenced remote JSON rules could not be synchronized.",
+                    {"remote_update": remote_update_result},
+                )
 
         with RULES_DAT_LOCK:
             singbox_json = convert_to_singbox_json(rule_lines)
@@ -1043,15 +1105,37 @@ def generate_rule_by_name(name):
             "singbox_json": singbox_json,
             "execution": srs_result,
             "files_index": files_index,
+            "remote_update": remote_update_result,
         }
 
 
 def generate_all_rules():
     results = []
+    rules = list_rules()
+    required_geo_rules = {
+        "geosite": set(),
+        "geoip": set(),
+    }
 
-    for rule in list_rules():
+    for rule in rules:
+        rule_required = collect_geo_rules_from_lines(rule["content"].splitlines())
+        for kind in required_geo_rules:
+            required_geo_rules[kind].update(rule_required[kind])
+
+    remote_update_result = ensure_required_geo_rules(required_geo_rules, load_config())
+    if not remote_update_result["ok"]:
+        return {
+            "ok": False,
+            "total": len(rules),
+            "success_count": 0,
+            "failure_count": len(rules),
+            "results": [],
+            "remote_update": remote_update_result,
+        }
+
+    for rule in rules:
         try:
-            result = generate_rule_by_name(rule["name"])
+            result = generate_rule_by_name(rule["name"], ensure_remote_rules=False)
             results.append(result)
         except Exception as error:
             results.append(
@@ -1070,6 +1154,7 @@ def generate_all_rules():
         "success_count": success_count,
         "failure_count": failure_count,
         "results": results,
+        "remote_update": remote_update_result,
     }
 
 

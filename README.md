@@ -158,14 +158,14 @@ geoip:cn
 
 ## 生成结果
 
-点击前端“生成”会生成当前规则集：
+点击前端“生成”会先检查当前规则集中引用的 `geosite:` / `geoip:` JSON 是否完整；如有缺失或损坏，会自动同步对应 JSON，然后生成当前规则集：
 
 ```text
 rule-set/{name}.json
 rule-set/srs/{name}.srs
 ```
 
-点击“全部生成”会遍历 `rules/*.txt` 并生成全部规则集。
+点击“全部生成”会先检查全部 `rules/*.txt` 中引用的 `geosite:` / `geoip:` JSON 是否完整；如有缺失或损坏，会自动同步对应 JSON，然后生成全部规则集。
 
 ## 远程规则同步与自动编译
 
