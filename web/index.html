@@ -1,0 +1,586 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>singbox-srs-generator</title>
+  <style>
+    :root {
+      color-scheme: light;
+      font-family: Arial, "Microsoft YaHei", sans-serif;
+      background: #f5f7fb;
+      color: #172033;
+    }
+
+    body {
+      margin: 0;
+    }
+
+    header {
+      background: #172033;
+      color: #fff;
+      padding: 20px 28px;
+    }
+
+    main {
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 28px;
+      display: grid;
+      gap: 20px;
+    }
+
+    section {
+      background: #fff;
+      border: 1px solid #d9dfeb;
+      border-radius: 8px;
+      padding: 20px;
+    }
+
+    h1,
+    h2,
+    h3 {
+      margin: 0;
+    }
+
+    h1 {
+      font-size: 24px;
+    }
+
+    h2 {
+      font-size: 18px;
+      margin-bottom: 16px;
+    }
+
+    h3 {
+      font-size: 15px;
+    }
+
+    label {
+      display: block;
+      font-weight: 700;
+      margin: 14px 0 6px;
+    }
+
+    input,
+    textarea {
+      box-sizing: border-box;
+      width: 100%;
+      border: 1px solid #bdc7d8;
+      border-radius: 6px;
+      padding: 10px 12px;
+      font: inherit;
+    }
+
+    input[type="checkbox"] {
+      width: auto;
+    }
+
+    textarea {
+      min-height: 220px;
+      resize: vertical;
+      font-family: Consolas, "Courier New", monospace;
+      line-height: 1.45;
+    }
+
+    button {
+      border: 0;
+      border-radius: 6px;
+      background: #2458d3;
+      color: #fff;
+      padding: 10px 14px;
+      font: inherit;
+      cursor: pointer;
+    }
+
+    button.secondary {
+      background: #46556f;
+    }
+
+    button.danger {
+      background: #b42318;
+    }
+
+    button:disabled {
+      cursor: not-allowed;
+      opacity: 0.6;
+    }
+
+    .actions {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-top: 14px;
+    }
+
+    .check-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-weight: 700;
+      margin-top: 14px;
+    }
+
+    .rules-layout {
+      display: grid;
+      grid-template-columns: 300px minmax(0, 1fr);
+      gap: 20px;
+      align-items: stretch;
+    }
+
+    .rules-panel {
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+    }
+
+    .rule-list {
+      border: 1px solid #d9dfeb;
+      border-radius: 8px;
+      flex: 1 1 auto;
+      min-height: 0;
+      overflow-y: auto;
+      overflow-x: hidden;
+    }
+
+    .rule-item {
+      width: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      border: 0;
+      border-bottom: 1px solid #e6ebf3;
+      border-radius: 0;
+      background: #fff;
+      color: #172033;
+      margin: 0;
+      padding: 8px 10px;
+      text-align: left;
+      min-height: 36px;
+    }
+
+    .rule-item:hover,
+    .rule-item.active {
+      background: #edf3ff;
+    }
+
+    .rule-name {
+      display: block;
+      font-weight: 700;
+      font-size: 13px;
+      line-height: 1.2;
+      min-width: 0;
+      overflow-wrap: anywhere;
+    }
+
+    .rule-meta {
+      display: block;
+      color: #5f6f89;
+      font-size: 12px;
+      line-height: 1.2;
+      flex: 0 0 auto;
+      white-space: nowrap;
+    }
+
+    .empty {
+      color: #5f6f89;
+      padding: 14px;
+    }
+
+    .status {
+      min-height: 22px;
+      color: #2458d3;
+      margin-top: 12px;
+      overflow-wrap: anywhere;
+    }
+
+    .hint {
+      color: #5f6f89;
+      font-size: 13px;
+      line-height: 1.5;
+      margin: 8px 0 0;
+      overflow-wrap: anywhere;
+    }
+
+    pre {
+      background: #101828;
+      color: #ecf2ff;
+      border-radius: 6px;
+      padding: 14px;
+      min-height: 90px;
+      overflow: auto;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+
+    @media (max-width: 760px) {
+      main {
+        padding: 18px;
+      }
+
+      .rules-layout {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>singbox-srs-generator</h1>
+  </header>
+
+  <main>
+    <section>
+      <h2>规则集管理</h2>
+      <div class="rules-layout">
+        <div class="rules-panel">
+          <div class="actions">
+            <button id="newRuleBtn" type="button">新建</button>
+            <button id="loadRulesBtn" class="secondary" type="button">刷新</button>
+          </div>
+          <div id="ruleList" class="rule-list" aria-live="polite"></div>
+        </div>
+
+        <form id="ruleForm">
+          <h3 id="editorTitle">新建规则集</h3>
+
+          <label for="ruleName">名称</label>
+          <input id="ruleName" type="text" placeholder="example">
+
+          <label for="ruleContent">内容</label>
+          <textarea id="ruleContent" placeholder="geosite:google&#10;geoip:cn&#10;domain:example.com&#10;keyword:youtube"></textarea>
+
+          <div class="actions">
+            <button id="saveRuleBtn" type="submit">创建</button>
+            <button id="generateRuleBtn" class="secondary" type="button" disabled>生成</button>
+            <button id="generateAllBtn" class="secondary" type="button">全部生成</button>
+            <button id="deleteRuleBtn" class="danger" type="button" disabled>删除</button>
+          </div>
+
+          <div id="status" class="status"></div>
+          <pre id="generateOutput">尚未生成</pre>
+        </form>
+      </div>
+    </section>
+
+    <section>
+      <h2>配置</h2>
+      <label for="geositeUrl">geosite JSON 目录地址</label>
+      <input id="geositeUrl" type="url" placeholder="https://api.github.com/repos/MetaCubeX/meta-rules-dat/contents/geo/geosite?ref=sing">
+      <p class="hint">默认：MetaCubeX/meta-rules-dat 的 sing 分支 geosite JSON 目录。</p>
+
+      <label for="geoipUrl">geoip JSON 目录地址</label>
+      <input id="geoipUrl" type="url" placeholder="https://api.github.com/repos/MetaCubeX/meta-rules-dat/contents/geo/geoip?ref=sing">
+      <p class="hint">默认：MetaCubeX/meta-rules-dat 的 sing 分支 geoip JSON 目录。也可以填写 GitHub 页面目录地址，后端会自动转成 API 地址。</p>
+
+      <label for="githubToken">GitHub Personal Access Token</label>
+      <input id="githubToken" type="password" autocomplete="off" placeholder="留空则保持当前 token 不变">
+
+      <label class="check-row" for="clearGithubToken">
+        <input id="clearGithubToken" type="checkbox">
+        清除已保存的 GitHub token
+      </label>
+
+      <label class="check-row" for="autoUpdateEnabled">
+        <input id="autoUpdateEnabled" type="checkbox">
+        启用 Docker 自动更新
+      </label>
+
+      <label for="autoUpdateCron">自动更新 cron 表达式</label>
+      <input id="autoUpdateCron" type="text" placeholder="0 4 * * *">
+
+      <div class="actions">
+        <button id="saveConfigBtn" type="button">保存配置</button>
+        <button id="reloadConfigBtn" class="secondary" type="button">重新加载</button>
+        <button id="remoteUpdateBtn" class="secondary" type="button">同步已引用 JSON 规则</button>
+      </div>
+      <pre id="remoteOutput">尚未同步</pre>
+    </section>
+  </main>
+
+  <script>
+    const geositeUrl = document.querySelector("#geositeUrl");
+    const geoipUrl = document.querySelector("#geoipUrl");
+    const githubToken = document.querySelector("#githubToken");
+    const clearGithubToken = document.querySelector("#clearGithubToken");
+    const autoUpdateEnabled = document.querySelector("#autoUpdateEnabled");
+    const autoUpdateCron = document.querySelector("#autoUpdateCron");
+    const remoteOutput = document.querySelector("#remoteOutput");
+    const ruleList = document.querySelector("#ruleList");
+    const ruleName = document.querySelector("#ruleName");
+    const ruleContent = document.querySelector("#ruleContent");
+    const editorTitle = document.querySelector("#editorTitle");
+    const saveRuleBtn = document.querySelector("#saveRuleBtn");
+    const generateRuleBtn = document.querySelector("#generateRuleBtn");
+    const generateAllBtn = document.querySelector("#generateAllBtn");
+    const deleteRuleBtn = document.querySelector("#deleteRuleBtn");
+    const statusText = document.querySelector("#status");
+    const generateOutput = document.querySelector("#generateOutput");
+
+    let rules = [];
+    let selectedRuleName = "";
+
+    function setStatus(message) {
+      statusText.textContent = message;
+    }
+
+    function showGenerateResult(data) {
+      generateOutput.textContent = JSON.stringify(data, null, 2);
+    }
+
+    function showRemoteResult(data) {
+      remoteOutput.textContent = JSON.stringify(data, null, 2);
+    }
+
+    function formatBytes(size) {
+      if (size < 1024) {
+        return `${size} B`;
+      }
+      if (size < 1024 * 1024) {
+        return `${(size / 1024).toFixed(1)} KB`;
+      }
+      return `${(size / 1024 / 1024).toFixed(1)} MB`;
+    }
+
+    async function requestJson(url, options) {
+      const response = await fetch(url, options);
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || "请求失败");
+      }
+      return data;
+    }
+
+    function postJson(url, payload) {
+      return requestJson(url, {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(payload)
+      });
+    }
+
+    async function loadConfig() {
+      const config = await requestJson("/api/config");
+      geositeUrl.value = config.geosite_url || "";
+      geoipUrl.value = config.geoip_url || "";
+      githubToken.value = "";
+      githubToken.placeholder = config.github_token_configured
+        ? "已配置 token，留空则保持不变"
+        : "未配置 token";
+      clearGithubToken.checked = false;
+      autoUpdateEnabled.checked = Boolean(config.auto_update_enabled);
+      autoUpdateCron.value = config.auto_update_cron || "0 4 * * *";
+    }
+
+    async function saveConfig() {
+      const payload = {
+        geosite_url: geositeUrl.value,
+        geoip_url: geoipUrl.value,
+        github_token: githubToken.value,
+        clear_github_token: clearGithubToken.checked,
+        auto_update_enabled: autoUpdateEnabled.checked,
+        auto_update_cron: autoUpdateCron.value
+      };
+
+      const result = await postJson("/api/config", payload);
+      githubToken.value = "";
+      clearGithubToken.checked = false;
+      setStatus(`配置已保存到 ${result.config_path || "config.json"}。`);
+      await loadConfig();
+    }
+
+    async function updateRemoteRules() {
+      setStatus("正在同步规则集中引用的远程 JSON 规则...");
+      const result = await postJson("/api/remote/update", {});
+      showRemoteResult(result);
+      setStatus(result.ok ? "已引用的远程 JSON 规则已同步。" : "远程 JSON 规则同步失败。");
+    }
+
+    function renderRules() {
+      ruleList.innerHTML = "";
+      rules.sort((left, right) => {
+        const leftCreated = Number(left.created_ns || left.created || 0);
+        const rightCreated = Number(right.created_ns || right.created || 0);
+        if (leftCreated !== rightCreated) {
+          return leftCreated - rightCreated;
+        }
+        return String(left.filename).localeCompare(String(right.filename));
+      });
+
+      if (rules.length === 0) {
+        const empty = document.createElement("div");
+        empty.className = "empty";
+        empty.textContent = "暂无规则集";
+        ruleList.appendChild(empty);
+        return;
+      }
+
+      for (const rule of rules) {
+        const item = document.createElement("button");
+        item.type = "button";
+        item.className = "rule-item";
+        if (rule.name === selectedRuleName) {
+          item.classList.add("active");
+        }
+
+        const name = document.createElement("span");
+        name.className = "rule-name";
+        name.textContent = rule.filename;
+
+        const meta = document.createElement("span");
+        meta.className = "rule-meta";
+        meta.textContent = formatBytes(rule.size);
+
+        item.append(name, meta);
+        item.addEventListener("click", () => selectRule(rule.name));
+        ruleList.appendChild(item);
+      }
+    }
+
+    async function loadRules() {
+      const data = await requestJson("/api/rules");
+      rules = data.rules || [];
+      renderRules();
+    }
+
+    function resetEditor() {
+      selectedRuleName = "";
+      ruleName.disabled = false;
+      ruleName.value = "";
+      ruleContent.value = "";
+      editorTitle.textContent = "新建规则集";
+      saveRuleBtn.textContent = "创建";
+      generateRuleBtn.disabled = true;
+      deleteRuleBtn.disabled = true;
+      generateOutput.textContent = "尚未生成";
+      renderRules();
+      setStatus("已切换到新建规则集。");
+      ruleName.focus();
+    }
+
+    function selectRule(name) {
+      const rule = rules.find((item) => item.name === name);
+      if (!rule) {
+        return;
+      }
+
+      selectedRuleName = rule.name;
+      ruleName.disabled = true;
+      ruleName.value = rule.name;
+      ruleContent.value = rule.content;
+      editorTitle.textContent = `编辑 ${rule.filename}`;
+      saveRuleBtn.textContent = "保存";
+      generateRuleBtn.disabled = false;
+      deleteRuleBtn.disabled = false;
+      renderRules();
+      setStatus("");
+    }
+
+    async function saveRule() {
+      const payload = {
+        name: ruleName.value,
+        content: ruleContent.value
+      };
+
+      if (selectedRuleName) {
+        payload.name = selectedRuleName;
+        const result = await postJson("/api/rules/update", payload);
+        selectedRuleName = result.rule.name;
+        setStatus("规则集已保存。");
+      } else {
+        const result = await postJson("/api/rules/create", payload);
+        selectedRuleName = result.rule.name;
+        setStatus("规则集已创建。");
+      }
+
+      await loadRules();
+      if (selectedRuleName) {
+        selectRule(selectedRuleName);
+      }
+    }
+
+    async function deleteRule() {
+      if (!selectedRuleName) {
+        return;
+      }
+
+      if (!confirm(`确认删除 ${selectedRuleName}.txt？`)) {
+        return;
+      }
+
+      await postJson("/api/rules/delete", {name: selectedRuleName});
+      resetEditor();
+      await loadRules();
+      setStatus("规则集已删除。");
+    }
+
+    async function generateRule() {
+      if (!selectedRuleName) {
+        return;
+      }
+
+      setStatus("正在生成...");
+      generateRuleBtn.disabled = true;
+      try {
+        const result = await postJson("/api/generate", {name: selectedRuleName});
+        showGenerateResult(result);
+        setStatus(`已生成 ${result.outputs.json} 和 ${result.outputs.srs}。`);
+      } finally {
+        generateRuleBtn.disabled = false;
+      }
+    }
+
+    async function generateAllRules() {
+      setStatus("正在生成全部规则集...");
+      generateAllBtn.disabled = true;
+      generateRuleBtn.disabled = true;
+      try {
+        const result = await postJson("/api/generate/all", {});
+        showGenerateResult(result);
+        setStatus(`全部生成完成：成功 ${result.success_count} 个，失败 ${result.failure_count} 个。`);
+      } finally {
+        generateAllBtn.disabled = false;
+        generateRuleBtn.disabled = !selectedRuleName;
+      }
+    }
+
+    document.querySelector("#saveConfigBtn").addEventListener("click", () => {
+      saveConfig().catch((error) => setStatus(error.message));
+    });
+
+    document.querySelector("#reloadConfigBtn").addEventListener("click", () => {
+      loadConfig().then(() => setStatus("配置已重新加载。")).catch((error) => setStatus(error.message));
+    });
+
+    document.querySelector("#remoteUpdateBtn").addEventListener("click", () => {
+      updateRemoteRules().catch((error) => setStatus(error.message));
+    });
+
+    document.querySelector("#loadRulesBtn").addEventListener("click", () => {
+      loadRules().then(() => setStatus("规则集列表已刷新。")).catch((error) => setStatus(error.message));
+    });
+
+    document.querySelector("#newRuleBtn").addEventListener("click", resetEditor);
+
+    document.querySelector("#ruleForm").addEventListener("submit", (event) => {
+      event.preventDefault();
+      saveRule().catch((error) => setStatus(error.message));
+    });
+
+    deleteRuleBtn.addEventListener("click", () => {
+      deleteRule().catch((error) => setStatus(error.message));
+    });
+
+    generateRuleBtn.addEventListener("click", () => {
+      generateRule().catch((error) => setStatus(error.message));
+    });
+
+    generateAllBtn.addEventListener("click", () => {
+      generateAllRules().catch((error) => setStatus(error.message));
+    });
+
+    Promise.all([loadConfig(), loadRules()]).catch((error) => setStatus(error.message));
+  </script>
+</body>
+</html>

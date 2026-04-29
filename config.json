@@ -1,0 +1,7 @@
+{
+  "geosite_url": "https://api.github.com/repos/MetaCubeX/meta-rules-dat/contents/geo/geosite?ref=sing",
+  "geoip_url": "https://api.github.com/repos/MetaCubeX/meta-rules-dat/contents/geo/geoip?ref=sing",
+  "github_token": "",
+  "auto_update_enabled": false,
+  "auto_update_cron": "0 4 * * *"
+}

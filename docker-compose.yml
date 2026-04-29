@@ -1,0 +1,19 @@
+services:
+  singbox-srs-generator:
+    build:
+      context: .
+      args:
+        SING_BOX_IMAGE: ghcr.io/sagernet/sing-box
+    container_name: singbox-srs-generator
+    environment:
+      GEOSITE_URL: "${GEOSITE_URL:-https://api.github.com/repos/MetaCubeX/meta-rules-dat/contents/geo/geosite?ref=sing}"
+      GEOIP_URL: "${GEOIP_URL:-https://api.github.com/repos/MetaCubeX/meta-rules-dat/contents/geo/geoip?ref=sing}"
+      GITHUB_TOKEN: "${GITHUB_TOKEN:-}"
+    ports:
+      - "9044:9044"
+    volumes:
+      - ./rules:/app/rules
+      - ./rules-dat:/app/rules-dat
+      - ./rule-set:/app/rule-set
+      - ./config.json:/app/config.json
+    restart: unless-stopped
