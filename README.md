@@ -10,7 +10,7 @@
 - 规则转换：生成 sing-box JSON 规则文件
 - SRS 生成：调用 `sing-box rule-set compile` 生成 `.srs`
 - 远程规则同步：按规则集中使用到的 `geosite:` / `geoip:` 下载对应 JSON
-- GitHub token 支持：通过 Docker 环境变量 `GITHUB_TOKEN` 配置
+- GitHub token 支持：通过前端配置或 Docker 环境变量 `GITHUB_TOKEN` 配置
 - Docker 部署：内置端口 `9044`
 - 无 Python 第三方依赖
 
@@ -19,9 +19,13 @@
 ```text
 .
 |-- app.py                 # 后端 HTTP 服务
+|-- bin/                   # sing-box 二进制文件
+|   |-- sing-box           # Linux
+|   `-- sing-box.exe       # Windows
 |-- config/
-|   |-- config.json        # 配置文件，token 默认保持为空
-|   `-- .env               # Docker 环境变量
+|   |-- config.json        # 配置文件
+|   |-- .env               # Docker 环境变量
+|   `-- .env.example       # 环境变量示例
 |-- Dockerfile
 |-- docker-compose.yml
 |-- docker/
@@ -52,9 +56,10 @@ http://localhost:9044
 
 默认挂载：
 
-- `/vol1/1000/DockerData/sing-box/rules:/app/rules`
-- `/vol1/1000/DockerData/sing-box/rules-dat:/app/rules-dat`
-- `/vol1/1000/DockerData/sing-box/rule-set:/app/rule-set`
+- `./rules:/app/rules`
+- `./rules-dat:/app/rules-dat`
+- `./rule-set:/app/rule-set`
+- `./bin:/app/bin`
 - `./config:/app/config`
 - `./config/.env` 通过 `env_file` 加载
 
@@ -68,14 +73,14 @@ GEOIP_URL=https://api.github.com/repos/MetaCubeX/meta-rules-dat/contents/geo/geo
 GITHUB_TOKEN=
 ```
 
-`GITHUB_TOKEN` 只从环境变量读取，不会保存到 `config.json`。
+`GITHUB_TOKEN` 环境变量优先级更高。也可以在 Web 前端配置页面直接填写 token，保存到 `config.json`。
 
 ### 本地 Windows 运行
 
-项目根目录需要存在：
+项目 `bin/` 目录需要存在：
 
 ```text
-sing-box.exe
+bin/sing-box.exe
 ```
 
 启动：
@@ -108,7 +113,7 @@ http://localhost:9044
 
 - `geosite_url`：远程 geosite JSON 目录地址
 - `geoip_url`：远程 geoip JSON 目录地址
-- `github_token`：保留为空，实际 token 使用 `GITHUB_TOKEN` 环境变量
+- `github_token`：可通过 Web 前端填写，环境变量 `GITHUB_TOKEN` 优先级更高
 - `auto_update_enabled`：Docker 环境下是否启用 cron 自动更新
 - `auto_update_cron`：自动更新 cron 表达式
 
@@ -185,11 +190,12 @@ rules-dat/geosite/google.json
 rules-dat/geoip/cn.json
 ```
 
-如果遇到 GitHub API rate limit，可以配置 `GITHUB_TOKEN`：
+如果遇到 GitHub API rate limit，可通过以下方式配置 `GITHUB_TOKEN`：
 
-```bash
-GITHUB_TOKEN=your_token docker compose up -d
-```
+- 在 Web 前端配置页面填写（保存到 config.json）
+- 通过环境变量：`GITHUB_TOKEN=your_token docker compose up -d`
+
+环境变量优先级更高。
 
 ## API
 
@@ -228,5 +234,5 @@ POST /api/remote/update
 - 项目不使用任何 Python 第三方依赖
 - 规则集名称只允许字母、数字、点、下划线和短横线
 - 前端页面需要通过后端服务访问，不建议直接双击打开 HTML
-- Docker 镜像构建时会从 `ghcr.io/sagernet/sing-box` 拷贝 `sing-box` 二进制，运行时不需要单独启动 sing-box 容器
-- 请不要把 GitHub token 写入 `config.json` 或提交到仓库
+- Docker 部署时需将 Linux 版 `sing-box` 二进制放入 `bin/` 目录，容器启动时会自动赋予执行权限
+- GitHub token 可通过 Web 前端安全配置，环境变量 `GITHUB_TOKEN` 优先级更高
