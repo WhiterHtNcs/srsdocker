@@ -1046,6 +1046,47 @@ def generate_rule_by_name(name):
         }
 
 
+def generate_all_rules():
+    results = []
+
+    for rule in list_rules():
+        try:
+            result = generate_rule_by_name(rule["name"])
+            results.append(result)
+        except Exception as error:
+            results.append(
+                {
+                    "ok": False,
+                    "rule": {"name": rule["name"], "filename": rule["filename"]},
+                    "error": str(error),
+                }
+            )
+
+    success_count = sum(1 for result in results if result.get("ok"))
+    failure_count = len(results) - success_count
+    return {
+        "ok": failure_count == 0,
+        "total": len(results),
+        "success_count": success_count,
+        "failure_count": failure_count,
+        "results": results,
+    }
+
+
+def update_remote_rules_and_generate(config=None):
+    remote_result = update_remote_rules(config)
+    generate_result = None
+
+    if remote_result["ok"]:
+        generate_result = generate_all_rules()
+
+    return {
+        "ok": remote_result["ok"] and (generate_result is None or generate_result["ok"]),
+        "remote_update": remote_result,
+        "generate_all": generate_result,
+    }
+
+
 class AppHandler(SimpleHTTPRequestHandler):
     server_version = "SingboxSrsGenerator/0.1"
 
@@ -1247,32 +1288,7 @@ class AppHandler(SimpleHTTPRequestHandler):
         self.send_json(result)
 
     def handle_generate_all(self):
-        results = []
-
-        for rule in list_rules():
-            try:
-                result = generate_rule_by_name(rule["name"])
-                results.append(result)
-            except Exception as error:
-                results.append(
-                    {
-                        "ok": False,
-                        "rule": {"name": rule["name"], "filename": rule["filename"]},
-                        "error": str(error),
-                    }
-                )
-
-        success_count = sum(1 for result in results if result.get("ok"))
-        failure_count = len(results) - success_count
-        self.send_json(
-            {
-                "ok": failure_count == 0,
-                "total": len(results),
-                "success_count": success_count,
-                "failure_count": failure_count,
-                "results": results,
-            }
-        )
+        self.send_json(generate_all_rules())
 
     def handle_remote_update(self):
         result = update_remote_rules(load_config())
@@ -1342,12 +1358,12 @@ def main(argv=None):
     parser.add_argument(
         "--update-remote-rules",
         action="store_true",
-        help="Download remote sing-box geosite and geoip JSON rule files according to config.json, then exit.",
+        help="Download remote sing-box geosite and geoip JSON rule files, generate all rule sets, then exit.",
     )
     args = parser.parse_args(argv)
 
     if args.update_remote_rules:
-        result = update_remote_rules(load_config())
+        result = update_remote_rules_and_generate(load_config())
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0 if result["ok"] else 1
 

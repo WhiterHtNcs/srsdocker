@@ -114,7 +114,7 @@ http://localhost:9044
 - `geosite_url`：远程 geosite JSON 目录地址
 - `geoip_url`：远程 geoip JSON 目录地址
 - `github_token`：可通过 Web 前端填写，环境变量 `GITHUB_TOKEN` 优先级更高
-- `auto_update_enabled`：Docker 环境下是否启用 cron 自动更新
+- `auto_update_enabled`：Docker 环境下是否启用 cron 自动更新；启用后会先同步远程 JSON 规则，再重新编译全部 `.srs`
 - `auto_update_cron`：自动更新 cron 表达式
 
 ## 规则格式
@@ -167,7 +167,7 @@ rule-set/srs/{name}.srs
 
 点击“全部生成”会遍历 `rules/*.txt` 并生成全部规则集。
 
-## 远程规则同步
+## 远程规则同步与自动编译
 
 远程规则来源默认使用：
 
@@ -188,6 +188,14 @@ geoip:cn
 ```text
 rules-dat/geosite/google.json
 rules-dat/geoip/cn.json
+```
+
+Docker 自动更新开启后，cron 任务会在同步成功后重新编译 `rules/*.txt` 中的全部规则，并刷新：
+
+```text
+rule-set/*.json
+rule-set/srs/*.srs
+rule-set/srs/files.txt
 ```
 
 如果遇到 GitHub API rate limit，可通过以下方式配置 `GITHUB_TOKEN`：
