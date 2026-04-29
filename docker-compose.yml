@@ -2,8 +2,6 @@ services:
   singbox-srs-generator:
     build:
       context: .
-      args:
-        SING_BOX_IMAGE: ghcr.io/sagernet/sing-box
     container_name: singbox-srs-generator
     env_file:
       - ./config/.env

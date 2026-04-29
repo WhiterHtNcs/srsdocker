@@ -1,6 +1,3 @@
-ARG SING_BOX_IMAGE=ghcr.io/sagernet/sing-box
-FROM ${SING_BOX_IMAGE} AS sing-box
-
 FROM python:3.12-slim
 
 WORKDIR /app
@@ -16,11 +13,9 @@ COPY rules ./rules
 COPY rules-dat ./rules-dat
 COPY rule-set ./rule-set
 COPY docker/entrypoint.sh /entrypoint.sh
-COPY --from=sing-box /usr/local/bin/sing-box ./bin/sing-box
 
 RUN chmod +x /entrypoint.sh \
-    && chmod +x /app/bin/sing-box \
-    && mkdir -p /app/config /app/rules /app/rules-dat/geosite /app/rules-dat/geoip /app/rule-set/srs
+    && mkdir -p /app/bin /app/config /app/rules /app/rules-dat/geosite /app/rules-dat/geoip /app/rule-set/srs
 
 EXPOSE 9044
 
