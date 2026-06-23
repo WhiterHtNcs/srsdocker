@@ -24,10 +24,16 @@ from urllib.parse import urlunparse
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = Path(os.environ.get("CONFIG_PATH", str(BASE_DIR / "config" / "config.json")))
+ORDER_PATH = Path(os.environ.get("ORDER_PATH", str(CONFIG_PATH.parent / "order.json")))
 WEB_DIR = BASE_DIR / "web"
 RULES_DIR = BASE_DIR / "rules"
 RULE_SET_DIR = BASE_DIR / "rule-set"
 SRS_DIR = RULE_SET_DIR / "srs"
+OPENCLASH_DIR = RULE_SET_DIR / "openclash"
+PROVIDERS_DIR = OPENCLASH_DIR / "providers"
+OPENCLASH_ALL_FILENAME = "openclash.yaml"
+TEMPLATE_PATH = BASE_DIR / "config" / "template.yaml"
+SUBSCRIBE_PATH = BASE_DIR / "config" / "subscribe.json"
 RULES_DAT_DIR = BASE_DIR / "rules-dat"
 SING_BOX_PATH = Path(os.environ.get("SING_BOX_PATH", str(BASE_DIR / "bin" / ("sing-box.exe" if os.name == "nt" else "sing-box"))))
 CRON_FILE = Path(os.environ.get("CRON_FILE", "/etc/cron.d/singbox-srs-generator"))
@@ -63,9 +69,12 @@ class RuleConversionError(Exception):
 
 
 def ensure_directories():
+    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
     RULES_DIR.mkdir(exist_ok=True)
     RULE_SET_DIR.mkdir(exist_ok=True)
     SRS_DIR.mkdir(exist_ok=True)
+    OPENCLASH_DIR.mkdir(exist_ok=True)
+    PROVIDERS_DIR.mkdir(exist_ok=True)
     (RULES_DAT_DIR / "geosite").mkdir(parents=True, exist_ok=True)
     (RULES_DAT_DIR / "geoip").mkdir(parents=True, exist_ok=True)
     WEB_DIR.mkdir(exist_ok=True)
@@ -167,6 +176,22 @@ def get_rule_path(name):
     return normalized, rule_path
 
 
+def normalize_rule_filename(filename):
+    if not isinstance(filename, str):
+        raise ValueError("Rule filename must be a string.")
+
+    normalized = filename.strip()
+    if not normalized.endswith(".txt"):
+        normalized = f"{normalized}.txt"
+
+    name = normalized[:-4]
+    rule_name = normalize_rule_name(name)
+    if normalized != f"{rule_name}.txt":
+        raise ValueError("Rule filename may only contain letters, numbers, dots, underscores, and hyphens.")
+
+    return normalized
+
+
 def get_srs_paths(name):
     normalized = normalize_rule_name(name)
     rule_set_root = RULE_SET_DIR.resolve()
@@ -208,6 +233,83 @@ def get_rules_dat_json_path(kind, code):
     return normalized, path
 
 
+def read_rule_order():
+    with CONFIG_LOCK:
+        if not ORDER_PATH.exists():
+            return []
+
+        ordered = []
+        seen = set()
+        raw_content = ORDER_PATH.read_text(encoding="utf-8").strip()
+        if not raw_content:
+            return []
+
+        try:
+            data = json.loads(raw_content)
+            candidates = data if isinstance(data, list) else []
+        except json.JSONDecodeError:
+            candidates = [
+                line.strip()
+                for line in raw_content.splitlines()
+                if line.strip() and not line.strip().startswith("#")
+            ]
+
+        for item in candidates:
+            try:
+                filename = normalize_rule_filename(item)
+            except ValueError:
+                continue
+
+            if filename in seen:
+                continue
+
+            seen.add(filename)
+            ordered.append(filename)
+
+        return ordered
+
+
+def save_rule_order(filenames):
+    normalized = []
+    seen = set()
+    for filename in filenames:
+        item = normalize_rule_filename(filename)
+        if item in seen:
+            continue
+        seen.add(item)
+        normalized.append(item)
+
+    content = json.dumps(normalized, ensure_ascii=False, indent=2) + "\n"
+
+    with CONFIG_LOCK:
+        ORDER_PATH.parent.mkdir(parents=True, exist_ok=True)
+        write_text_file_atomic(ORDER_PATH, content)
+
+    return normalized
+
+
+def reconcile_rule_order(rules):
+    existing = {rule["filename"] for rule in rules}
+    current_order = [filename for filename in read_rule_order() if filename in existing]
+    current_set = set(current_order)
+    missing = [
+        rule["filename"]
+        for rule in sorted(rules, key=lambda item: (item["created_ns"], item["filename"].lower()))
+        if rule["filename"] not in current_set
+    ]
+    return save_rule_order(current_order + missing)
+
+
+def apply_rule_order(rules):
+    order = reconcile_rule_order(rules)
+    positions = {filename: index for index, filename in enumerate(order)}
+
+    for rule in rules:
+        rule["order"] = positions.get(rule["filename"], len(positions))
+
+    return sorted(rules, key=lambda rule: (rule["order"], rule["filename"].lower()))
+
+
 def list_rules():
     with RULES_LOCK:
         rules = []
@@ -230,7 +332,37 @@ def list_rules():
                 }
             )
 
-        return sorted(rules, key=lambda rule: (rule["created_ns"], rule["filename"].lower()))
+        return apply_rule_order(rules)
+
+
+def update_rule_order(filenames):
+    requested = []
+    seen = set()
+    for filename in filenames:
+        normalized = normalize_rule_filename(filename)
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        requested.append(normalized)
+
+    with RULES_LOCK:
+        existing = existing_rule_filenames()
+        unknown = [filename for filename in requested if filename not in existing]
+        if unknown:
+            raise ValueError(f"Unknown rule filename: {unknown[0]}")
+
+        missing = sorted(existing - set(requested), key=str.lower)
+        order = save_rule_order(requested + missing)
+
+    return order
+
+
+def existing_rule_filenames():
+    return {
+        path.name
+        for path in RULES_DIR.glob("*.txt")
+        if path.is_file()
+    }
 
 
 def list_srs_files():
@@ -251,6 +383,34 @@ def list_srs_files():
 
     for path in sorted(SRS_DIR.glob("*.srs"), key=lambda item: item.name.lower()):
         if not path.is_file() or path.suffix not in (".json", ".srs"):
+            continue
+
+        stat = path.stat()
+        files.append(
+            {
+                "filename": path.name,
+                "path": str(path.relative_to(BASE_DIR)),
+                "size": stat.st_size,
+                "modified": stat.st_mtime,
+            }
+        )
+
+    for path in sorted(OPENCLASH_DIR.glob("*.yaml"), key=lambda item: item.name.lower()):
+        if not path.is_file():
+            continue
+
+        stat = path.stat()
+        files.append(
+            {
+                "filename": path.name,
+                "path": str(path.relative_to(BASE_DIR)),
+                "size": stat.st_size,
+                "modified": stat.st_mtime,
+            }
+        )
+
+    for path in sorted(PROVIDERS_DIR.glob("*.list"), key=lambda item: item.name.lower()):
+        if not path.is_file():
             continue
 
         stat = path.stat()
@@ -976,6 +1136,166 @@ def convert_to_singbox_json(rule_lines):
     }
 
 
+def openclash_rule_type_for_ip_cidr(value):
+    return "IP-CIDR6" if ":" in str(value) else "IP-CIDR"
+
+
+def append_openclash_rule(lines, seen, rule_type, value, options=None):
+    if value is None:
+        return
+
+    item = str(value).strip()
+    if not item:
+        return
+
+    parts = [rule_type, item]
+    if options:
+        parts.extend(options)
+    line = ",".join(parts)
+
+    if line in seen:
+        return
+
+    seen.add(line)
+    lines.append(line)
+
+
+def dump_openclash_yaml(payload):
+    if not payload:
+        return "# Generated by singbox-srs-generator.\npayload: []\n"
+
+    lines = [
+        "# Generated by singbox-srs-generator.",
+        "payload:",
+    ]
+    lines.extend(f"  - {json.dumps(item, ensure_ascii=False)}" for item in payload)
+    return "\n".join(lines) + "\n"
+
+
+def write_text_file_atomic(output_path, content):
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_fd, temp_name = tempfile.mkstemp(
+        prefix=f".{output_path.name}.",
+        suffix=".tmp",
+        dir=str(output_path.parent),
+    )
+    os.close(temp_fd)
+    temp_path = Path(temp_name)
+
+    try:
+        temp_path.write_text(content, encoding="utf-8")
+        os.replace(temp_path, output_path)
+    finally:
+        try:
+            if temp_path.exists():
+                temp_path.unlink()
+        except OSError:
+            pass
+
+
+def openclash_rule_options(rule_target=None, no_resolve=False):
+    options = []
+    if rule_target:
+        options.append(str(rule_target).strip())
+    if no_resolve:
+        options.append("no-resolve")
+    return options
+
+
+def convert_to_openclash_yaml(rule_lines, rule_target=None):
+    payload = []
+    seen = set()
+
+    for line_number, raw_line in enumerate(rule_lines, start=1):
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+
+        geo_reference = parse_geo_reference(line)
+        if geo_reference:
+            kind, code = geo_reference
+            normalized_code = normalize_geo_code(code)
+            if kind == "geosite":
+                append_openclash_rule(
+                    payload,
+                    seen,
+                    "GEOSITE",
+                    normalized_code,
+                    options=openclash_rule_options(rule_target),
+                )
+            else:
+                append_openclash_rule(
+                    payload,
+                    seen,
+                    "GEOIP",
+                    normalized_code.upper(),
+                    options=openclash_rule_options(rule_target, no_resolve=True),
+                )
+            continue
+
+        if line.startswith("domain:"):
+            value = line[len("domain:") :].strip()
+            if not value:
+                raise ValueError(f"Line {line_number}: domain value is empty.")
+            append_openclash_rule(payload, seen, "DOMAIN-SUFFIX", value, options=openclash_rule_options(rule_target))
+            continue
+
+        if line.startswith("full:"):
+            value = line[len("full:") :].strip()
+            if not value:
+                raise ValueError(f"Line {line_number}: full value is empty.")
+            append_openclash_rule(payload, seen, "DOMAIN", value.rstrip("."), options=openclash_rule_options(rule_target))
+            continue
+
+        if line.startswith("keyword:"):
+            value = line[len("keyword:") :].strip()
+            if not value:
+                raise ValueError(f"Line {line_number}: keyword value is empty.")
+            append_openclash_rule(payload, seen, "DOMAIN-KEYWORD", value, options=openclash_rule_options(rule_target))
+            continue
+
+        if line.startswith("regexp:"):
+            value = line[len("regexp:") :].strip()
+            if not value:
+                raise ValueError(f"Line {line_number}: regexp value is empty.")
+            append_openclash_rule(payload, seen, "DOMAIN-REGEX", value, options=openclash_rule_options(rule_target))
+            continue
+
+        if is_plain_domain(line):
+            append_openclash_rule(
+                payload,
+                seen,
+                "DOMAIN-KEYWORD",
+                line.rstrip("."),
+                options=openclash_rule_options(rule_target),
+            )
+            continue
+
+        parsed_ip_cidr = parse_plain_ip_cidr(line)
+        if parsed_ip_cidr:
+            append_openclash_rule(
+                payload,
+                seen,
+                openclash_rule_type_for_ip_cidr(parsed_ip_cidr),
+                parsed_ip_cidr,
+                options=openclash_rule_options(rule_target, no_resolve=True),
+            )
+            continue
+
+        if is_plain_keyword(line):
+            append_openclash_rule(payload, seen, "DOMAIN-KEYWORD", line, options=openclash_rule_options(rule_target))
+            continue
+
+        raise ValueError(f"Line {line_number}: unsupported rule format.")
+
+    return {
+        "yaml": dump_openclash_yaml(payload),
+        "payload": payload,
+        "skipped": [],
+    }
+
+
 def compile_singbox_json_to_srs(singbox_json):
     if not SING_BOX_PATH.exists():
         raise RuleConversionError("sing-box binary not found.", {"command": [str(SING_BOX_PATH)]})
@@ -1158,6 +1478,417 @@ def generate_all_rules():
     }
 
 
+def get_merged_rule_names(rules):
+    """Build (merged_names, ip_skip) where XIP rules are merged into X.
+
+    If Direct.txt and DirectIP.txt both exist, DirectIP is merged into Direct.
+    If only DirectIP.txt exists (no Direct), it stays standalone.
+    """
+    names = {r["name"] for r in rules}
+    merged = set()
+    ip_skip = set()
+    for name in sorted(names):
+        if name.endswith("IP") and name[:-2] in names:
+            ip_skip.add(name)
+        else:
+            merged.add(name)
+    return merged, ip_skip
+
+
+def generate_all_openclash_rules():
+    results = []
+    rules = list_rules()
+    combined_payload = []
+    seen = set()
+    skipped = []
+
+    # Build merge map: XIP rules that should be merged into their base X
+    _, ip_skip_rules = get_merged_rule_names(rules)
+
+    # Clean stale .list files from previous generation
+    for old_file in PROVIDERS_DIR.glob("*.list"):
+        old_file.unlink(missing_ok=True)
+
+    for rule in rules:
+        try:
+            with RULES_LOCK:
+                _, rule_path = get_rule_path(rule["name"])
+                rule_lines = rule_path.read_text(encoding="utf-8").splitlines()
+
+            openclash = convert_to_openclash_yaml(rule_lines, rule_target=rule["name"])
+
+            # Generate .list file, merging IP rules into their base counterpart
+            if rule["name"] not in ip_skip_rules:
+                # Check if there's a corresponding IP rule to merge
+                ip_name = rule["name"] + "IP"
+                if ip_name in ip_skip_rules:
+                    with RULES_LOCK:
+                        _, ip_path = get_rule_path(ip_name)
+                        extra_lines = ip_path.read_text(encoding="utf-8").splitlines()
+                    all_lines = rule_lines + extra_lines
+                else:
+                    all_lines = rule_lines
+
+                provider_payload = convert_to_openclash_yaml(all_lines)["payload"]
+                provider_path = PROVIDERS_DIR / (rule["name"] + ".list")
+                write_text_file_atomic(provider_path, dump_openclash_yaml(provider_payload))
+            else:
+                # IP rule merged into base — no individual .list needed
+                pass
+
+            for item in openclash["payload"]:
+                if item in seen:
+                    continue
+                seen.add(item)
+                combined_payload.append(item)
+
+            if openclash["skipped"]:
+                skipped.append(
+                    {
+                        "rule": {"name": rule["name"], "filename": rule["filename"]},
+                        "skipped": openclash["skipped"],
+                    }
+                )
+
+            results.append(
+                {
+                    "ok": True,
+                    "rule": {"name": rule["name"], "filename": rule["filename"]},
+                    "payload_count": len(openclash["payload"]),
+                    "skipped": openclash["skipped"],
+                }
+            )
+        except Exception as error:
+            results.append(
+                {
+                    "ok": False,
+                    "rule": {"name": rule["name"], "filename": rule["filename"]},
+                    "error": str(error),
+                }
+            )
+
+    success_count = sum(1 for result in results if result.get("ok"))
+    failure_count = len(results) - success_count
+    combined_output = None
+    full_config_result = None
+    if failure_count == 0:
+        # Backward-compatible combined payload
+        output_path = OPENCLASH_DIR / OPENCLASH_ALL_FILENAME
+        write_text_file_atomic(output_path, dump_openclash_yaml(combined_payload))
+        combined_output = {
+            "path": str(output_path.relative_to(BASE_DIR)),
+            "payload_count": len(combined_payload),
+            "skipped": skipped,
+        }
+
+        # Generate full OpenClash config (overwrites openclash.yaml)
+        try:
+            full_config_result = generate_full_openclash_config()
+        except Exception as error:
+            full_config_result = {"ok": False, "error": str(error)}
+
+    return {
+        "ok": failure_count == 0,
+        "total": len(results),
+        "success_count": success_count,
+        "failure_count": failure_count,
+        "results": results,
+        "combined_output": combined_output,
+        "full_config": full_config_result,
+    }
+
+
+def load_subscribe_config():
+    """Read subscribe.json and return (providers list, global_user_agent)."""
+    if not SUBSCRIBE_PATH.exists():
+        return [], None
+    try:
+        data = json.loads(SUBSCRIBE_PATH.read_text(encoding="utf-8"))
+        providers = data.get("providers", [])
+        global_ua = data.get("user_agent") or data.get("default_user_agent")
+        return providers, global_ua
+    except (json.JSONDecodeError, OSError):
+        return [], None
+
+
+def generate_proxy_providers_yaml(providers, global_user_agent=None):
+    """Generate proxy-providers YAML section from subscribe.json providers list."""
+
+    def sanitize_yaml_string(value):
+        if value is None:
+            return ""
+        s = str(value)
+        if any(c in s for c in ":,#{}[]&*!|>'\"%@`"):
+            return json.dumps(s, ensure_ascii=False)
+        return s
+
+    lines = [
+        "# ===== 代理提供商（自动生成，编辑 config/subscribe.json 修改）=====",
+        "proxy-providers:",
+    ]
+
+    for p in providers:
+        name = sanitize_yaml_string(p.get("name", "Unknown"))
+        url = str(p.get("url", ""))
+        interval = int(p.get("interval", 86400))
+        hc = p.get("health_check")
+        override = p.get("override", {})
+
+        lines.append(f"  {name}:")
+        lines.append(f"    type: http")
+        lines.append(f"    interval: {interval}")
+
+        # Health check (only when explicitly configured)
+        if isinstance(hc, dict) and hc.get("enable", True):
+            hc_url = sanitize_yaml_string(
+                hc.get("url", "https://www.gstatic.com/generate_204")
+            )
+            hc_interval = int(hc.get("interval", 300))
+            lines.append(f"    health-check:")
+            lines.append(f"      enable: true")
+            lines.append(f"      url: {hc_url}")
+            lines.append(f"      interval: {hc_interval}")
+
+        # User-Agent header (supports string or list of strings)
+        raw_ua = p.get("user_agent") or global_user_agent or "ClashMetaForAndroid/2.11.2.Meta"
+        ua_list = raw_ua if isinstance(raw_ua, list) else [raw_ua]
+        lines.append(f"    header:")
+        lines.append(f"      User-Agent:")
+        for ua in ua_list:
+            lines.append(f'        - "{ua}"')
+
+        # Override (e.g. additional-prefix)
+        if override:
+            lines.append(f"    override:")
+            for k, v in override.items():
+                # Normalize underscores to hyphens for OpenClash YAML keys
+                yaml_key = k.replace("_", "-")
+                lines.append(f"      {yaml_key}: {sanitize_yaml_string(v)}")
+
+        # Path and URL - keep Unicode characters, only strip forbidden path chars
+        safe_name = re.sub(r'[\\/:*?"<>|]', '_', name)
+        lines.append(f'    path: "./proxies/{safe_name}.yaml"')
+        lines.append(f"    url: {sanitize_yaml_string(url)}")
+
+    return "\n".join(lines) + "\n"
+
+
+def read_template():
+    """Read template.yaml, return preamble + parsed generator sections.
+
+    Returns:
+        dict with keys: preamble, rule_mapping, custom_rules
+        Returns None if template not found.
+    """
+    if not TEMPLATE_PATH.exists():
+        return None
+
+    text = TEMPLATE_PATH.read_text(encoding="utf-8")
+
+    # Split at the generator-only marker
+    marker = "# ===== Generator-Only Sections"
+    marker_idx = text.find(marker)
+
+    if marker_idx == -1:
+        # No marker — whole file is preamble
+        return {
+            "preamble": text,
+            "rule_mapping": {},
+            "custom_rules": [],
+        }
+
+    preamble = text[:marker_idx].rstrip()
+    generator_text = text[marker_idx:]
+
+    rule_mapping = {}
+    custom_rules = []
+    current_section = None
+
+    for raw_line in generator_text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or line.startswith("#"):
+            continue
+
+        # Detect section switches (top-level keys at column 0)
+        if line == "rule_mapping:":
+            current_section = "rule_mapping"
+            continue
+        if line == "custom_rules:":
+            current_section = "custom_rules"
+            continue
+
+        # Skip sub-keys of sections we don't parse
+        if current_section is None:
+            continue
+
+        # A line back at column 0 means a new section started
+        if not raw_line.startswith(" ") and raw_line.strip():
+            current_section = None
+            continue
+
+        if current_section == "rule_mapping" and ":" in line:
+            key, _, value = line.partition(":")
+            rule_mapping[key.strip()] = value.strip().strip('"').strip("'")
+
+        elif current_section == "custom_rules" and line.startswith("- "):
+            custom_rules.append(line[2:].strip().strip('"').strip("'"))
+
+    return {
+        "preamble": preamble,
+        "rule_mapping": rule_mapping,
+        "custom_rules": custom_rules,
+    }
+
+
+def generate_rules_yaml(rule_mapping, custom_rules):
+    """Generate rules: YAML section with inline rules from rules/*.txt + custom_rules.
+
+    Each rule file is read, converted to classical format with the mapped proxy
+    group as the target, and inlined directly into the rules section.
+    No external rule-provider references needed.
+    """
+    if not rule_mapping:
+        return ""
+
+    lines = [
+        "# ===== 分流规则（自动生成）=====",
+        "rules:",
+    ]
+
+    # Custom rules first
+    for rule in custom_rules:
+        lines.append(f"  - {rule}")
+
+    # Inline rules from each mapped rule file
+    for rule_name, proxy_group in sorted(rule_mapping.items()):
+        try:
+            _, rule_path = get_rule_path(rule_name)
+            if not rule_path.exists():
+                continue
+            rule_lines = rule_path.read_text(encoding="utf-8").splitlines()
+            converted = convert_to_openclash_yaml(rule_lines, rule_target=proxy_group)
+            for item in converted["payload"]:
+                lines.append(f"  - {item}")
+        except (OSError, ValueError):
+            # Skip rules that can't be read
+            pass
+
+    return "\n".join(lines) + "\n"
+
+
+def generate_full_openclash_config():
+    """Generate full OpenClash configuration YAML.
+
+    Combines:
+      1. template.yaml preamble (base settings, proxy-groups)
+      2. proxy-providers from subscribe.json
+      3. rule-providers from rules/*.txt + rule_mapping
+      4. rules from rule_mapping + custom_rules
+
+    Returns dict with result info, or {"ok": false, "error": ...} on failure.
+    """
+    # Step 1: Load template
+    template = read_template()
+    if template is None:
+        return {
+            "ok": False,
+            "error": "Template not found: openclash/template.yaml",
+        }
+
+    rule_mapping = template.get("rule_mapping", {})
+    custom_rules = template.get("custom_rules", [])
+
+    # Filter rule_mapping: remove IP rules that will be merged into their base
+    rules_list = list_rules()
+    effective_names, _ = get_merged_rule_names(rules_list)
+    rule_mapping = {k: v for k, v in rule_mapping.items() if k in effective_names}
+
+    if not rule_mapping:
+        return {"ok": False, "error": "rule_mapping is empty in template."}
+
+    # Step 2: Load subscriptions
+    providers, global_ua = load_subscribe_config()
+
+    # Step 2.5: Replace __PROVIDERS__ and __PROVIDER_GROUPS__ placeholders
+    provider_names = [p.get("name", "Unknown") for p in providers]
+    preamble = template["preamble"]
+    if provider_names and "__PROVIDERS__" in preamble:
+        # First line inherits indentation from where __PROVIDERS__ sits in the template
+        provider_lines = [f"- {provider_names[0]}"]
+        provider_lines += [f"      - {name}" for name in provider_names[1:]]
+        providers_yaml_block = "\n".join(provider_lines)
+        preamble = preamble.replace("__PROVIDERS__", providers_yaml_block)
+
+    if provider_names and "__PROVIDER_GROUPS__" in preamble:
+        group_lines = []
+        for i, name in enumerate(provider_names):
+            if i == 0:
+                # First line inherits template indentation
+                group_lines.append(f"- name: {name}")
+            else:
+                group_lines.append(f"  - name: {name}")
+            group_lines.append(f"  type: select")
+            group_lines.append(f"  use:")
+            group_lines.append(f"    - {name}")
+        provider_groups_block = "\n".join(group_lines)
+        preamble = preamble.replace("__PROVIDER_GROUPS__", provider_groups_block)
+
+    if "__RULE_GROUPS__" in preamble:
+        rule_group_lines = []
+        # Auto-generate select groups for rules where rule_name == target_group
+        auto_rules = [(k, v) for k, v in sorted(rule_mapping.items()) if k == v]
+        for i, (rule_name, _) in enumerate(auto_rules):
+            if i > 0:
+                rule_group_lines.append("")
+            if len(rule_group_lines) == 0:
+                rule_group_lines.append(f"- name: {rule_name}")
+            else:
+                rule_group_lines.append(f"  - name: {rule_name}")
+            rule_group_lines.append(f"  type: select")
+            rule_group_lines.append(f"  proxies:")
+            rule_group_lines.append(f"    - ALL·延迟最低")
+            for name in provider_names:
+                rule_group_lines.append(f"    - {name}")
+            rule_group_lines.append(f"    - 🌐 本机·本地直连")
+        rule_groups_block = "\n".join(rule_group_lines)
+        preamble = preamble.replace("__RULE_GROUPS__", rule_groups_block)
+
+    # Step 3: Generate YAML sections
+    proxy_providers_yaml = generate_proxy_providers_yaml(providers, global_ua) if providers else ""
+    rules_yaml = generate_rules_yaml(rule_mapping, custom_rules)
+
+    # Step 4: Assemble
+    # Insert proxy-providers at __PROXY_PROVIDERS__ marker in the preamble
+    proxy_marker = "__PROXY_PROVIDERS__"
+    if proxy_marker in preamble and proxy_providers_yaml:
+        before, after = preamble.split(proxy_marker, 1)
+        parts = [before.rstrip(), "", proxy_providers_yaml.rstrip(), after]
+    else:
+        # No marker: append at end (fallback)
+        parts = [preamble.rstrip()]
+        if proxy_providers_yaml:
+            parts.append("")
+            parts.append(proxy_providers_yaml.rstrip())
+
+    parts.append("")
+    parts.append(rules_yaml.rstrip())
+    parts.append("")
+
+    full_yaml = "\n".join(parts)
+
+    # Step 5: Write output
+    output_path = OPENCLASH_DIR / OPENCLASH_ALL_FILENAME
+    write_text_file_atomic(output_path, full_yaml)
+
+    return {
+        "ok": True,
+        "path": str(output_path.relative_to(BASE_DIR)),
+        "mapping_count": len(rule_mapping),
+        "provider_count": len(providers),
+        "proxy_providers": [p.get("name", "Unknown") for p in providers],
+    }
+
+
 def update_remote_rules_and_generate(config=None):
     remote_result = update_remote_rules(config)
     generate_result = None
@@ -1187,6 +1918,10 @@ class AppHandler(SimpleHTTPRequestHandler):
 
         if parsed.path == "/api/rules":
             self.send_json({"rules": list_rules()})
+            return
+
+        if parsed.path == "/api/rules/order":
+            self.send_json({"order": read_rule_order(), "order_path": str(ORDER_PATH)})
             return
 
         if parsed.path == "/api/srs":
@@ -1257,12 +1992,20 @@ class AppHandler(SimpleHTTPRequestHandler):
             self.handle_rule_delete()
             return
 
+        if parsed.path == "/api/rules/order":
+            self.handle_rule_order()
+            return
+
         if parsed.path == "/api/generate":
             self.handle_generate()
             return
 
         if parsed.path == "/api/generate/all":
             self.handle_generate_all()
+            return
+
+        if parsed.path == "/api/generate/openclash/all":
+            self.handle_generate_openclash_all()
             return
 
         if parsed.path == "/api/remote/update":
@@ -1293,6 +2036,13 @@ class AppHandler(SimpleHTTPRequestHandler):
                 return
 
             rule_path.write_text(content, encoding="utf-8")
+            existing = existing_rule_filenames()
+            current_order = [
+                filename
+                for filename in read_rule_order()
+                if filename in existing and filename != rule_path.name
+            ]
+            save_rule_order(current_order + [rule_path.name])
         self.send_json({"ok": True, "rule": {"name": name, "filename": rule_path.name}}, status=HTTPStatus.CREATED)
 
     def handle_rule_update(self):
@@ -1336,7 +2086,30 @@ class AppHandler(SimpleHTTPRequestHandler):
                 return
 
             rule_path.unlink()
+            existing = existing_rule_filenames()
+            save_rule_order([filename for filename in read_rule_order() if filename in existing])
         self.send_json({"ok": True, "rule": {"name": name, "filename": rule_path.name}})
+
+    def handle_rule_order(self):
+        payload = self.read_json_body()
+        if payload is None:
+            return
+
+        filenames = payload.get("order", payload.get("filenames"))
+        if not isinstance(filenames, list):
+            self.send_json({"error": "Rule order must be a list of filenames."}, status=HTTPStatus.BAD_REQUEST)
+            return
+
+        try:
+            order = update_rule_order(filenames)
+        except ValueError as error:
+            self.send_json({"error": str(error)}, status=HTTPStatus.BAD_REQUEST)
+            return
+        except OSError as error:
+            self.send_json({"error": str(error)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
+
+        self.send_json({"ok": True, "order": order, "order_path": str(ORDER_PATH)})
 
     def handle_generate(self):
         payload = self.read_json_body()
@@ -1374,6 +2147,9 @@ class AppHandler(SimpleHTTPRequestHandler):
 
     def handle_generate_all(self):
         self.send_json(generate_all_rules())
+
+    def handle_generate_openclash_all(self):
+        self.send_json(generate_all_openclash_rules())
 
     def handle_remote_update(self):
         result = update_remote_rules(load_config())

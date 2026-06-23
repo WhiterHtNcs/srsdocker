@@ -15,7 +15,7 @@ COPY rule-set ./rule-set
 COPY docker/entrypoint.sh /entrypoint.sh
 
 RUN chmod +x /entrypoint.sh \
-    && mkdir -p /app/bin /app/config /app/rules /app/rules-dat/geosite /app/rules-dat/geoip /app/rule-set/srs
+    && mkdir -p /app/bin /app/config /app/rules /app/rules-dat/geosite /app/rules-dat/geoip /app/rule-set/srs /app/rule-set/openclash /app/rule-set/openclash/providers
 
 EXPOSE 9044
 

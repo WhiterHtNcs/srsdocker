@@ -160,9 +160,48 @@
       min-height: 36px;
     }
 
+    .rule-select {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      flex: 1 1 auto;
+      min-width: 0;
+      border: 0;
+      border-radius: 0;
+      background: transparent;
+      color: inherit;
+      padding: 0;
+      text-align: left;
+    }
+
+    .rule-select:hover {
+      background: transparent;
+    }
+
     .rule-item:hover,
     .rule-item.active {
       background: #edf3ff;
+    }
+
+    .rule-order-actions {
+      display: flex;
+      gap: 4px;
+      flex: 0 0 auto;
+    }
+
+    .rule-order-btn {
+      width: 24px;
+      height: 24px;
+      border-radius: 4px;
+      padding: 0;
+      background: #eef2f8;
+      color: #172033;
+      line-height: 1;
+    }
+
+    .rule-order-btn:hover {
+      background: #dce6f5;
     }
 
     .rule-name {
@@ -255,6 +294,7 @@
             <button id="saveRuleBtn" type="submit">创建</button>
             <button id="generateRuleBtn" class="secondary" type="button" disabled>生成</button>
             <button id="generateAllBtn" class="secondary" type="button">全部生成</button>
+            <button id="generateOpenClashBtn" class="secondary" type="button">生成 OpenClash</button>
             <button id="deleteRuleBtn" class="danger" type="button" disabled>删除</button>
           </div>
 
@@ -311,6 +351,7 @@
     const saveRuleBtn = document.querySelector("#saveRuleBtn");
     const generateRuleBtn = document.querySelector("#generateRuleBtn");
     const generateAllBtn = document.querySelector("#generateAllBtn");
+    const generateOpenClashBtn = document.querySelector("#generateOpenClashBtn");
     const deleteRuleBtn = document.querySelector("#deleteRuleBtn");
     const statusText = document.querySelector("#status");
     const generateOutput = document.querySelector("#generateOutput");
@@ -401,14 +442,6 @@
 
     function renderRules() {
       ruleList.innerHTML = "";
-      rules.sort((left, right) => {
-        const leftCreated = Number(left.created_ns || left.created || 0);
-        const rightCreated = Number(right.created_ns || right.created || 0);
-        if (leftCreated !== rightCreated) {
-          return leftCreated - rightCreated;
-        }
-        return String(left.filename).localeCompare(String(right.filename));
-      });
 
       if (rules.length === 0) {
         const empty = document.createElement("div");
@@ -418,13 +451,16 @@
         return;
       }
 
-      for (const rule of rules) {
-        const item = document.createElement("button");
-        item.type = "button";
+      for (const [index, rule] of rules.entries()) {
+        const item = document.createElement("div");
         item.className = "rule-item";
         if (rule.name === selectedRuleName) {
           item.classList.add("active");
         }
+
+        const selectButton = document.createElement("button");
+        selectButton.type = "button";
+        selectButton.className = "rule-select";
 
         const name = document.createElement("span");
         name.className = "rule-name";
@@ -434,10 +470,54 @@
         meta.className = "rule-meta";
         meta.textContent = formatBytes(rule.size);
 
-        item.append(name, meta);
-        item.addEventListener("click", () => selectRule(rule.name));
+        const orderActions = document.createElement("div");
+        orderActions.className = "rule-order-actions";
+
+        const moveUp = document.createElement("button");
+        moveUp.type = "button";
+        moveUp.className = "rule-order-btn";
+        moveUp.textContent = "▲";
+        moveUp.title = "上移";
+        moveUp.disabled = index === 0;
+        moveUp.addEventListener("click", () => moveRule(index, -1));
+
+        const moveDown = document.createElement("button");
+        moveDown.type = "button";
+        moveDown.className = "rule-order-btn";
+        moveDown.textContent = "▼";
+        moveDown.title = "下移";
+        moveDown.disabled = index === rules.length - 1;
+        moveDown.addEventListener("click", () => moveRule(index, 1));
+
+        selectButton.append(name, meta);
+        selectButton.addEventListener("click", () => selectRule(rule.name));
+        orderActions.append(moveUp, moveDown);
+        item.append(selectButton, orderActions);
         ruleList.appendChild(item);
       }
+    }
+
+    async function saveRuleOrder() {
+      const order = rules.map((rule) => rule.filename);
+      const result = await postJson("/api/rules/order", {order});
+      setStatus(`规则顺序已保存到 ${result.order_path || "config/order.json"}。`);
+    }
+
+    function moveRule(index, direction) {
+      const targetIndex = index + direction;
+      if (targetIndex < 0 || targetIndex >= rules.length) {
+        return;
+      }
+
+      const nextRules = [...rules];
+      const [rule] = nextRules.splice(index, 1);
+      nextRules.splice(targetIndex, 0, rule);
+      rules = nextRules;
+      renderRules();
+      saveRuleOrder().catch((error) => {
+        setStatus(error.message);
+        loadRules().catch((loadError) => setStatus(loadError.message));
+      });
     }
 
     async function loadRules() {
@@ -547,6 +627,24 @@
       }
     }
 
+    async function generateOpenClashRules() {
+      setStatus("正在生成 OpenClash YAML...");
+      generateOpenClashBtn.disabled = true;
+      try {
+        const result = await postJson("/api/generate/openclash/all", {});
+        showGenerateResult(result);
+        const combinedPath = result.combined_output && result.combined_output.path ? `，汇总文件 ${result.combined_output.path}` : "";
+        const fullConfigMsg = result.full_config?.ok
+          ? `，完整配置已生成（${result.full_config.proxy_providers?.length || 0} 个机场订阅）`
+          : result.full_config
+            ? `，完整配置生成失败：${result.full_config.error}`
+            : "";
+        setStatus(`OpenClash 生成完成：成功 ${result.success_count} 个，失败 ${result.failure_count} 个${combinedPath}${fullConfigMsg}。`);
+      } finally {
+        generateOpenClashBtn.disabled = false;
+      }
+    }
+
     document.querySelector("#saveConfigBtn").addEventListener("click", () => {
       saveConfig().catch((error) => setStatus(error.message));
     });
@@ -580,6 +678,10 @@
 
     generateAllBtn.addEventListener("click", () => {
       generateAllRules().catch((error) => setStatus(error.message));
+    });
+
+    generateOpenClashBtn.addEventListener("click", () => {
+      generateOpenClashRules().catch((error) => setStatus(error.message));
     });
 
     Promise.all([loadConfig(), loadRules()]).catch((error) => setStatus(error.message));

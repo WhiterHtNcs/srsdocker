@@ -1,0 +1,7 @@
+# Config
+config/subscribe.json
+config/template.yaml
+
+# OS files
+.DS_Store
+Thumbs.db
