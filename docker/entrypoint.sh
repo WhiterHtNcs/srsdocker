@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-mkdir -p /app/rules /app/rules-dat/geosite /app/rules-dat/geoip /app/rule-set/srs /app/rule-set/openclash /app/rule-set/openclash/providers
+mkdir -p /app/mapping/rules /app/mapping/rules-dat/geosite /app/mapping/rules-dat/geoip /app/mapping/rule-set/srs /app/mapping/rule-set/openclash /app/mapping/rule-set/openclash/providers
 chmod +x /app/bin/sing-box 2>/dev/null || true
 
 CRON_FILE=/etc/cron.d/singbox-srs-generator
@@ -12,7 +12,7 @@ import os
 import re
 from pathlib import Path
 
-config_path = Path(os.environ.get("CONFIG_PATH", "/app/config/config.json"))
+config_path = Path(os.environ.get("CONFIG_PATH", "/app/mapping/config/config.json"))
 config = {}
 if config_path.exists():
     config = json.loads(config_path.read_text(encoding="utf-8"))

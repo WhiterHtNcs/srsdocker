@@ -1,13 +1,15 @@
-# Config
-config/subscribe.json
-config/template.yaml
-config/order.json
-config/ports.json
+# Config (all locations)
+subscribe.json
+template.yaml
+ports.json
+order.json
 
-# Rules
+# All data
+mapping/
 rules/
 rule-set/
 rules-dat/
+bin/
 
 # Logs
 log/

@@ -5,13 +5,9 @@ services:
     container_name: singbox-srs-generator
     network_mode: bridge
     env_file:
-      - ./config/.env
+      - ./mapping/config/.env
     ports:
       - "9044:9044"
     volumes:
-      - ./rules:/app/rules
-      - ./rules-dat:/app/rules-dat
-      - ./rule-set:/app/rule-set
-      - ./bin:/app/bin
-      - ./config:/app/config
+      - ./mapping:/app/mapping
     restart: unless-stopped

@@ -23,20 +23,21 @@ from urllib.parse import urlunparse
 
 
 BASE_DIR = Path(__file__).resolve().parent
-CONFIG_PATH = Path(os.environ.get("CONFIG_PATH", str(BASE_DIR / "config" / "config.json")))
+MAPPING_DIR = BASE_DIR / "mapping"
+CONFIG_PATH = Path(os.environ.get("CONFIG_PATH", str(MAPPING_DIR / "config" / "config.json")))
 ORDER_PATH = Path(os.environ.get("ORDER_PATH", str(CONFIG_PATH.parent / "order.json")))
 WEB_DIR = BASE_DIR / "web"
-RULES_DIR = BASE_DIR / "rules"
-RULE_SET_DIR = BASE_DIR / "rule-set"
+RULES_DIR = MAPPING_DIR / "rules"
+RULE_SET_DIR = MAPPING_DIR / "rule-set"
 SRS_DIR = RULE_SET_DIR / "srs"
 OPENCLASH_DIR = RULE_SET_DIR / "openclash"
 PROVIDERS_DIR = OPENCLASH_DIR / "providers"
 OPENCLASH_ALL_FILENAME = "openclash.yaml"
-TEMPLATE_PATH = BASE_DIR / "config" / "template.yaml"
-SUBSCRIBE_PATH = BASE_DIR / "config" / "subscribe.json"
-PORTS_PATH = BASE_DIR / "config" / "ports.json"
-RULES_DAT_DIR = BASE_DIR / "rules-dat"
-SING_BOX_PATH = Path(os.environ.get("SING_BOX_PATH", str(BASE_DIR / "bin" / ("sing-box.exe" if os.name == "nt" else "sing-box"))))
+TEMPLATE_PATH = MAPPING_DIR / "config" / "template.yaml"
+SUBSCRIBE_PATH = MAPPING_DIR / "config" / "subscribe.json"
+PORTS_PATH = MAPPING_DIR / "config" / "ports.json"
+RULES_DAT_DIR = MAPPING_DIR / "rules-dat"
+SING_BOX_PATH = Path(os.environ.get("SING_BOX_PATH", str(MAPPING_DIR / "bin" / ("sing-box.exe" if os.name == "nt" else "sing-box"))))
 CRON_FILE = Path(os.environ.get("CRON_FILE", "/etc/cron.d/singbox-srs-generator"))
 APP_PORT = 9044
 MAX_JSON_BODY_BYTES = 1024 * 1024
@@ -70,6 +71,7 @@ class RuleConversionError(Exception):
 
 
 def ensure_directories():
+    MAPPING_DIR.mkdir(parents=True, exist_ok=True)
     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
     RULES_DIR.mkdir(exist_ok=True)
     RULE_SET_DIR.mkdir(exist_ok=True)
@@ -1624,7 +1626,7 @@ def generate_proxy_providers_yaml(providers, global_user_agent=None):
     ua_anchor = None
     if global_user_agent:
         ua_list = global_user_agent if isinstance(global_user_agent, list) else [global_user_agent]
-        ua_anchor = "_ua"
+        ua_anchor = "x-ua"
         lines.append(f"{ua_anchor}: &{ua_anchor}")
         lines.append(f"  header:")
         lines.append(f"    User-Agent:")
