@@ -7,11 +7,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY app.py ./
-COPY config ./config
 COPY web ./web
-COPY rules ./rules
-COPY rules-dat ./rules-dat
-COPY rule-set ./rule-set
 COPY docker/entrypoint.sh /entrypoint.sh
 
 RUN chmod +x /entrypoint.sh \
