@@ -1,6 +1,20 @@
 # Config
 config/subscribe.json
 config/template.yaml
+config/order.json
+config/ports.json
+
+# Rules
+rules/
+rule-set/
+rules-dat/
+
+# Logs
+log/
+
+# Python
+__pycache__/
+*.pyc
 
 # OS files
 .DS_Store

@@ -34,6 +34,7 @@ PROVIDERS_DIR = OPENCLASH_DIR / "providers"
 OPENCLASH_ALL_FILENAME = "openclash.yaml"
 TEMPLATE_PATH = BASE_DIR / "config" / "template.yaml"
 SUBSCRIBE_PATH = BASE_DIR / "config" / "subscribe.json"
+PORTS_PATH = BASE_DIR / "config" / "ports.json"
 RULES_DAT_DIR = BASE_DIR / "rules-dat"
 SING_BOX_PATH = Path(os.environ.get("SING_BOX_PATH", str(BASE_DIR / "bin" / ("sing-box.exe" if os.name == "nt" else "sing-box"))))
 CRON_FILE = Path(os.environ.get("CRON_FILE", "/etc/cron.d/singbox-srs-generator"))
@@ -1517,24 +1518,17 @@ def generate_all_openclash_rules():
 
             openclash = convert_to_openclash_yaml(rule_lines, rule_target=rule["name"])
 
-            # Generate .list file, merging IP rules into their base counterpart
-            if rule["name"] not in ip_skip_rules:
-                # Check if there's a corresponding IP rule to merge
-                ip_name = rule["name"] + "IP"
-                if ip_name in ip_skip_rules:
-                    with RULES_LOCK:
-                        _, ip_path = get_rule_path(ip_name)
-                        extra_lines = ip_path.read_text(encoding="utf-8").splitlines()
-                    all_lines = rule_lines + extra_lines
-                else:
-                    all_lines = rule_lines
-
-                provider_payload = convert_to_openclash_yaml(all_lines)["payload"]
-                provider_path = PROVIDERS_DIR / (rule["name"] + ".list")
-                write_text_file_atomic(provider_path, dump_openclash_yaml(provider_payload))
-            else:
-                # IP rule merged into base — no individual .list needed
-                pass
+            # Skip IP rules that are merged into their base counterpart
+            if rule["name"] in ip_skip_rules:
+                results.append(
+                    {
+                        "ok": True,
+                        "rule": {"name": rule["name"], "filename": rule["filename"]},
+                        "payload_count": 0,
+                        "skipped": [],
+                    }
+                )
+                continue
 
             for item in openclash["payload"]:
                 if item in seen:
@@ -1624,8 +1618,21 @@ def generate_proxy_providers_yaml(providers, global_user_agent=None):
 
     lines = [
         "# ===== 代理提供商（自动生成，编辑 config/subscribe.json 修改）=====",
-        "proxy-providers:",
     ]
+
+    # If there's a global UA, define it once as a YAML anchor
+    ua_anchor = None
+    if global_user_agent:
+        ua_list = global_user_agent if isinstance(global_user_agent, list) else [global_user_agent]
+        ua_anchor = "_ua"
+        lines.append(f"{ua_anchor}: &{ua_anchor}")
+        lines.append(f"  header:")
+        lines.append(f"    User-Agent:")
+        for ua in ua_list:
+            lines.append(f'      - "{ua}"')
+        lines.append("")
+
+    lines.append("proxy-providers:")
 
     for p in providers:
         name = sanitize_yaml_string(p.get("name", "Unknown"))
@@ -1635,6 +1642,18 @@ def generate_proxy_providers_yaml(providers, global_user_agent=None):
         override = p.get("override", {})
 
         lines.append(f"  {name}:")
+
+        # If provider has its own UA, write inline; otherwise use anchor
+        custom_ua = p.get("user_agent")
+        if ua_anchor and not custom_ua:
+            lines.append(f"    <<: *{ua_anchor}")
+        elif custom_ua:
+            ua_list = custom_ua if isinstance(custom_ua, list) else [custom_ua]
+            lines.append(f"    header:")
+            lines.append(f"      User-Agent:")
+            for ua in ua_list:
+                lines.append(f'        - "{ua}"')
+
         lines.append(f"    type: http")
         lines.append(f"    interval: {interval}")
 
@@ -1648,14 +1667,6 @@ def generate_proxy_providers_yaml(providers, global_user_agent=None):
             lines.append(f"      enable: true")
             lines.append(f"      url: {hc_url}")
             lines.append(f"      interval: {hc_interval}")
-
-        # User-Agent header (supports string or list of strings)
-        raw_ua = p.get("user_agent") or global_user_agent or "ClashMetaForAndroid/2.11.2.Meta"
-        ua_list = raw_ua if isinstance(raw_ua, list) else [raw_ua]
-        lines.append(f"    header:")
-        lines.append(f"      User-Agent:")
-        for ua in ua_list:
-            lines.append(f'        - "{ua}"')
 
         # Override (e.g. additional-prefix)
         if override:
@@ -1740,7 +1751,18 @@ def read_template():
     }
 
 
-def generate_rules_yaml(rule_mapping, custom_rules):
+def load_ports_config():
+    """Read ports.json and return list of direct port ranges."""
+    if not PORTS_PATH.exists():
+        return []
+    try:
+        data = json.loads(PORTS_PATH.read_text(encoding="utf-8"))
+        return data.get("direct_ports", [])
+    except (json.JSONDecodeError, OSError):
+        return []
+
+
+def generate_rules_yaml(rule_mapping, custom_rules, direct_ports=None):
     """Generate rules: YAML section with inline rules from rules/*.txt + custom_rules.
 
     Each rule file is read, converted to classical format with the mapped proxy
@@ -1755,12 +1777,19 @@ def generate_rules_yaml(rule_mapping, custom_rules):
         "rules:",
     ]
 
-    # Custom rules first
+    # Non-MATCH custom rules first (DST-PORT etc.)
+    match_rules = [r for r in custom_rules if r.startswith("MATCH,")]
     for rule in custom_rules:
-        lines.append(f"  - {rule}")
+        if not rule.startswith("MATCH,"):
+            lines.append(f"  - {rule}")
 
-    # Inline rules from each mapped rule file
-    for rule_name, proxy_group in sorted(rule_mapping.items()):
+    # BT/PT direct ports from ports.json
+    if direct_ports:
+        for port_range in direct_ports:
+            lines.append(f"  - DST-PORT,{port_range},Direct")
+
+    # Inline rules from each mapped rule file (in template definition order)
+    for rule_name, proxy_group in rule_mapping.items():
         try:
             _, rule_path = get_rule_path(rule_name)
             if not rule_path.exists():
@@ -1772,6 +1801,10 @@ def generate_rules_yaml(rule_mapping, custom_rules):
         except (OSError, ValueError):
             # Skip rules that can't be read
             pass
+
+    # MATCH rules at the very end (catch-all)
+    for rule in match_rules:
+        lines.append(f"  - {rule}")
 
     return "\n".join(lines) + "\n"
 
@@ -1827,9 +1860,9 @@ def generate_full_openclash_config():
                 group_lines.append(f"- name: {name}")
             else:
                 group_lines.append(f"  - name: {name}")
-            group_lines.append(f"  type: select")
-            group_lines.append(f"  use:")
-            group_lines.append(f"    - {name}")
+            group_lines.append(f"    type: select")
+            group_lines.append(f"    use:")
+            group_lines.append(f"      - {name}")
         provider_groups_block = "\n".join(group_lines)
         preamble = preamble.replace("__PROVIDER_GROUPS__", provider_groups_block)
 
@@ -1855,7 +1888,8 @@ def generate_full_openclash_config():
 
     # Step 3: Generate YAML sections
     proxy_providers_yaml = generate_proxy_providers_yaml(providers, global_ua) if providers else ""
-    rules_yaml = generate_rules_yaml(rule_mapping, custom_rules)
+    direct_ports = load_ports_config()
+    rules_yaml = generate_rules_yaml(rule_mapping, custom_rules, direct_ports)
 
     # Step 4: Assemble
     # Insert proxy-providers at __PROXY_PROVIDERS__ marker in the preamble
