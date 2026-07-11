@@ -1,8 +1,8 @@
 services:
-  singbox-srs-generator:
+  srsdocker:
     build:
       context: .
-    container_name: singbox-srs-generator
+    container_name: srsdocker
     network_mode: bridge
     env_file:
       - ./mapping/config/.env
