@@ -9,5 +9,7 @@ services:
     ports:
       - "9044:9044"
     volumes:
+      - ./app.py:/app/app.py
+      - ./web:/app/web
       - ./mapping:/app/mapping
     restart: unless-stopped
