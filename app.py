@@ -69,9 +69,9 @@ COUNTRY_NODE_FILTERS = (
         "美国",
         r"(?i)(美国|美國|\bUS\b|\bUSA\b|United States|洛杉矶|洛杉磯|圣何塞|聖何塞|西雅图|西雅圖|纽约|紐約|芝加哥|达拉斯|達拉斯)",
     ),
-    ("新加坡", r"(?i)(新加坡|狮城|獅城|\bSG\b|Singapore)"),
-    ("台湾", r"(?i)(台湾|台灣|\bTW\b|Taiwan|台北|臺北|新北|高雄|台中|臺中)"),
-    ("日本", r"(?i)(日本|\bJP\b|Japan|东京|東京|大阪|札幌|川崎)"),
+    ("新加坡", r"(?i)(新加坡|狮城|獅城|\bSG\b|\bSGP\b|Singapore)"),
+    ("台湾", r"(?i)(台湾|台灣|\bTW\b|\bTWN\b|Taiwan|台北|臺北|新北|高雄|台中|臺中)"),
+    ("日本", r"(?i)(日本|\bJP\b|\bJPN\b|Japan|东京|東京|大阪|札幌|川崎)"),
 )
 
 
@@ -1780,8 +1780,8 @@ def get_provider_country_groups(providers):
     """Return (group_name, provider_name, filter) tuples for every airport/country pair."""
     return [
         (f"{provider.get('name', 'Unknown')}·{country}", provider.get("name", "Unknown"), node_filter)
-        for country, node_filter in COUNTRY_NODE_FILTERS
         for provider in providers
+        for country, node_filter in COUNTRY_NODE_FILTERS
     ]
 
 
@@ -1791,7 +1791,7 @@ def get_ai_providers(providers):
 
 
 def generate_provider_country_groups_yaml(providers):
-    """Generate select groups that filter one provider to one country/region."""
+    """Generate latency-test groups that filter one provider to one country/region."""
     groups = get_provider_country_groups(providers)
     lines = []
     for index, (group_name, provider_name, node_filter) in enumerate(groups):
@@ -1801,7 +1801,8 @@ def generate_provider_country_groups_yaml(providers):
         lines.extend(
             [
                 f"{prefix}: {group_name}",
-                "    type: select",
+                "    type: url-test",
+                "    lazy: true",
                 "    use:",
                 f"      - {provider_name}",
                 f"    filter: '{node_filter}'",
@@ -1815,43 +1816,6 @@ def generate_provider_country_references_yaml(providers):
     names = [group_name for group_name, _, _ in get_provider_country_groups(providers)]
     if not names:
         return ""
-    return "\n".join([f"- {names[0]}", *[f"      - {name}" for name in names[1:]]])
-
-
-def generate_ai_auto_test_groups_yaml(providers):
-    """Generate AI-only latency groups for all nodes and each country/region."""
-    provider_names = [provider.get("name", "Unknown") for provider in providers]
-    if not provider_names:
-        return ""
-
-    group_specs = [("AI·延迟最低", None)] + [
-        (f"AI·{country}", node_filter) for country, node_filter in COUNTRY_NODE_FILTERS
-    ]
-    lines = []
-    for index, (group_name, node_filter) in enumerate(group_specs):
-        if index:
-            lines.append("")
-        prefix = "- name" if index == 0 else "  - name"
-        lines.extend(
-            [
-                f"{prefix}: {group_name}",
-                "    type: url-test",
-                "    lazy: true",
-                "    use:",
-                f"      - {provider_names[0]}",
-                *[f"      - {provider_name}" for provider_name in provider_names[1:]],
-            ]
-        )
-        if node_filter:
-            lines.append(f"    filter: '{node_filter}'")
-    return "\n".join(lines)
-
-
-def generate_ai_auto_test_references_yaml(providers):
-    """Generate AI-only latency group references for the AI policy group."""
-    if not providers:
-        return ""
-    names = ["AI·延迟最低", *[f"AI·{country}" for country, _ in COUNTRY_NODE_FILTERS]]
     return "\n".join([f"- {names[0]}", *[f"      - {name}" for name in names[1:]]])
 
 
@@ -2038,33 +2002,15 @@ def generate_full_openclash_config():
         provider_groups_block = "\n".join(group_lines)
         preamble = preamble.replace("__PROVIDER_GROUPS__", provider_groups_block)
 
-    if provider_names and "__PROVIDER_COUNTRY_GROUPS__" in preamble:
+    if "__PROVIDER_COUNTRY_GROUPS__" in preamble:
         preamble = preamble.replace(
             "__PROVIDER_COUNTRY_GROUPS__", generate_provider_country_groups_yaml(ai_providers)
         )
 
-    if provider_names and "__PROVIDER_COUNTRY_NODES__" in preamble:
+    if "__PROVIDER_COUNTRY_NODES__" in preamble:
         preamble = preamble.replace(
             "__PROVIDER_COUNTRY_NODES__", generate_provider_country_references_yaml(ai_providers)
         )
-
-    if "__AI_AUTO_TEST_GROUPS__" in preamble:
-        preamble = preamble.replace(
-            "__AI_AUTO_TEST_GROUPS__", generate_ai_auto_test_groups_yaml(ai_providers)
-        )
-
-    if "__AI_AUTO_TEST_NODES__" in preamble:
-        preamble = preamble.replace(
-            "__AI_AUTO_TEST_NODES__", generate_ai_auto_test_references_yaml(ai_providers)
-        )
-
-    if "__AI_PROVIDERS__" in preamble:
-        ai_provider_lines = []
-        if ai_providers:
-            ai_provider_names = [provider.get("name", "Unknown") for provider in ai_providers]
-            ai_provider_lines = [f"- {ai_provider_names[0]}"]
-            ai_provider_lines += [f"      - {name}" for name in ai_provider_names[1:]]
-        preamble = preamble.replace("__AI_PROVIDERS__", "\n".join(ai_provider_lines))
 
     if "__RULE_GROUPS__" in preamble:
         rule_group_lines = []

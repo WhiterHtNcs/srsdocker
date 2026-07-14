@@ -99,7 +99,7 @@ python app.py
 | `providers[].url` | 订阅地址 |
 | `providers[].interval` | 更新间隔（秒，默认 86400） |
 | `providers[].health_check` | 可选，健康检查配置 |
-| `providers[].use_for_ai` | 是否加入 AI 策略组，默认 `true` |
+| `providers[].use_for_ai` | 是否为 AI 策略组生成“机场·国家”节点组，默认 `true` |
 | `providers[].override.additional-prefix` | 节点名前缀 |
 
 ### `mapping/config/template.yaml`
@@ -116,11 +116,8 @@ OpenClash 配置模板，**私人配置，不提交 Git**。包含：
 |--------|--------|
 | `__ALLNODES__` | 全部节点（机场名列表，放 `proxies:` 引用机场组，放 `use:` 平铺所有节点） |
 | `__PROVIDER_GROUPS__` | 各机场对应的 select 策略组定义（机场组） |
-| `__PROVIDER_COUNTRY_GROUPS__` | 所有“机场·国家”节点筛选组定义 |
-| `__PROVIDER_COUNTRY_NODES__` | 所有“机场·国家”组名称列表，可嵌入策略组的 `proxies:` |
-| `__AI_AUTO_TEST_GROUPS__` | 仅由 AI 机场组成的延迟测速组定义 |
-| `__AI_AUTO_TEST_NODES__` | AI 延迟测速组名称列表，可嵌入 AI 的 `proxies:` |
-| `__AI_PROVIDERS__` | 已启用 AI 的机场名列表，可嵌入 AI 的 `proxies:` 或 `use:` |
+| `__PROVIDER_COUNTRY_GROUPS__` | 所有启用 AI 的“机场·国家”延迟测速组定义 |
+| `__PROVIDER_COUNTRY_NODES__` | 所有启用 AI 的“机场·国家”组名称列表，可嵌入 AI 的 `proxies:` |
 | `__RULE_GROUPS__` | 各规则类别对应的 select 策略组（rule_mapping 中值=键的条目） |
 | `__PROXY_PROVIDERS__` | proxy-providers 插入位置 |
 

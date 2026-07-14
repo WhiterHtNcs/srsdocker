@@ -67,7 +67,7 @@ srsdocker/
 }
 ```
 - `user_agent` 支持字符串或字符串数组（数组会展开为多个 UA 列表项）
-- `providers[].use_for_ai` 为 `false` 时，该机场不会出现在 AI 的测速、机场节点或“机场·国家”选项中
+- `providers[].use_for_ai` 为 `false` 时，该机场不会生成 AI 可选的“机场·国家”节点组
 - 生成的 proxy-providers 用 YAML 锚点 `&x-ua` 去重 UA，每个 provider 用 `<<: *x-ua` 继承
 - **⚠️ 含真实订阅链接，绝不能提交 git，也不能在对话/输出中泄露 URL**
 
@@ -104,11 +104,8 @@ srsdocker/
 |--------|---------|---------|
 | `__PROXY_PROVIDERS__` | 整个 `proxy-providers:` 块（含 x-ua 锚点 + 各机场） | prelude 顶部插入点 |
 | `__PROVIDER_GROUPS__` | 各机场的 select 策略组**定义**（`- name: X / type: select / use: [X]`） | proxy-groups 列表内 |
-| `__PROVIDER_COUNTRY_GROUPS__` | 每个“机场·国家”的 select 节点筛选组定义 | proxy-groups 列表内 |
-| `__PROVIDER_COUNTRY_NODES__` | 每个“机场·国家”组名称列表 | 策略组的 `proxies:` 下 |
-| `__AI_AUTO_TEST_GROUPS__` | 仅由启用 AI 的机场组成的延迟测速组定义 | proxy-groups 列表内 |
-| `__AI_AUTO_TEST_NODES__` | AI 延迟测速组名称列表 | AI 的 `proxies:` 下 |
-| `__AI_PROVIDERS__` | 已启用 AI 的机场名列表 | AI 的 `proxies:` 或 `use:` 下 |
+| `__PROVIDER_COUNTRY_GROUPS__` | 每个启用 AI 的“机场·国家”url-test 延迟测速组定义 | proxy-groups 列表内 |
+| `__PROVIDER_COUNTRY_NODES__` | 每个启用 AI 的“机场·国家”组名称列表 | AI 的 `proxies:` 下 |
 | `__ALLNODES__` | 机场名列表（`- 机场A / - 机场B ...`） | proxy-groups 的 `proxies:` 或 `use:` 下 |
 | `__RULE_GROUPS__` | rule_mapping 中"键=值"条目对应的 select 组定义 | proxy-groups 列表内 |
 
@@ -168,7 +165,7 @@ docker compose up -d --build
 
 1. `read_template()` 解析 template.yaml → 拆出 prelude + rule_mapping + custom_rules
 2. `load_subscribe_config()` 读 subscribe.json → providers + 全局 UA
-3. 占位符替换（`__PROXY_PROVIDERS__` / `__PROVIDER_GROUPS__` / `__PROVIDER_COUNTRY_GROUPS__` / `__PROVIDER_COUNTRY_NODES__` / `__AI_AUTO_TEST_GROUPS__` / `__AI_AUTO_TEST_NODES__` / `__AI_PROVIDERS__` / `__ALLNODES__` / `__RULE_GROUPS__`）
+3. 占位符替换（`__PROXY_PROVIDERS__` / `__PROVIDER_GROUPS__` / `__PROVIDER_COUNTRY_GROUPS__` / `__PROVIDER_COUNTRY_NODES__` / `__ALLNODES__` / `__RULE_GROUPS__`）
 4. `load_ports_config()` 读 ports.json → 生成 BT/PT 直连 DST-PORT 规则
 5. `generate_rules_yaml()` 拼装内联 rules 段：
    - 非 MATCH 的 custom_rules 在前
@@ -184,7 +181,7 @@ docker compose up -d --build
 - **MATCH 必须最后**：custom_rules 里若有 `MATCH`，不能和其他规则混排，会 shadow 全部后续规则
 - **UA 锚点用 `x-ua`**：曾用 `_ua`（前导下划线某些 OpenClash 版本异常），已改
 - **占位符别写进注释**：模板注释里若含占位符文本会被误替换
-- **多行替换缩进**：`__ALLNODES__` / `__PROVIDER_GROUPS__` / `__PROVIDER_COUNTRY_GROUPS__` / `__PROVIDER_COUNTRY_NODES__` / `__AI_AUTO_TEST_NODES__` / `__AI_PROVIDERS__` 替换时只有首行继承模板缩进，后续行由生成逻辑补齐缩进
+- **多行替换缩进**：`__ALLNODES__` / `__PROVIDER_GROUPS__` / `__PROVIDER_COUNTRY_GROUPS__` / `__PROVIDER_COUNTRY_NODES__` 替换时只有首行继承模板缩进，后续行由生成逻辑补齐缩进
 - **fake-ip 模式**：DNS 必须有 `default-nameserver`，否则 OpenClash 拒绝加载
 - **empty proxies**：proxy-groups 的组不能有空的 `proxies:`，模板里不要留空段
 
