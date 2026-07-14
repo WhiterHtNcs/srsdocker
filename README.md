@@ -84,6 +84,7 @@ python app.py
       "url": "https://your-subscribe-url",
       "interval": 86400,
       "use_for_ai": true,
+      "use_for_latency": false,
       "override": {
         "additional-prefix": "Main："
       }
@@ -100,6 +101,7 @@ python app.py
 | `providers[].interval` | 更新间隔（秒，默认 86400） |
 | `providers[].health_check` | 可选，健康检查配置 |
 | `providers[].use_for_ai` | 是否为 AI 策略组生成“机场·国家”节点组，默认 `true` |
+| `providers[].use_for_latency` | 是否让该机场组自动选择延迟最低节点，默认 `false` |
 | `providers[].override.additional-prefix` | 节点名前缀 |
 
 ### `mapping/config/template.yaml`
@@ -115,7 +117,7 @@ OpenClash 配置模板，**私人配置，不提交 Git**。包含：
 | 占位符 | 替换为 |
 |--------|--------|
 | `__ALLNODES__` | 全部节点（机场名列表，放 `proxies:` 引用机场组，放 `use:` 平铺所有节点） |
-| `__PROVIDER_GROUPS__` | 各机场对应的 select 策略组定义（机场组） |
+| `__PROVIDER_GROUPS__` | 各机场策略组定义；`use_for_latency: true` 时为 url-test，否则为 select |
 | `__PROVIDER_COUNTRY_GROUPS__` | 所有启用 AI 的“机场·国家”延迟测速组定义 |
 | `__PROVIDER_COUNTRY_NODES__` | 所有启用 AI 的“机场·国家”组名称列表，可嵌入 AI 的 `proxies:` |
 | `__RULE_GROUPS__` | 各规则类别对应的 select 策略组（rule_mapping 中值=键的条目） |

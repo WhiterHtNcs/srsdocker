@@ -630,7 +630,15 @@
       useForAi.dataset.field = "use_for_ai";
       aiField.append(useForAi, document.createTextNode("用于 AI 策略组"));
 
-      grid.append(name.field, interval.field, url.field, aiField);
+      const latencyField = document.createElement("label");
+      latencyField.className = "check-row wide";
+      const useForLatency = document.createElement("input");
+      useForLatency.type = "checkbox";
+      useForLatency.checked = provider.use_for_latency === true;
+      useForLatency.dataset.field = "use_for_latency";
+      latencyField.append(useForLatency, document.createTextNode("机场组自动选择延迟最低节点"));
+
+      grid.append(name.field, interval.field, url.field, aiField, latencyField);
       card.append(heading, grid);
       return card;
     }
@@ -660,6 +668,7 @@
         provider.url = card.querySelector('[data-field="url"]').value.trim();
         provider.interval = Number(card.querySelector('[data-field="interval"]').value);
         provider.use_for_ai = card.querySelector('[data-field="use_for_ai"]').checked;
+        provider.use_for_latency = card.querySelector('[data-field="use_for_latency"]').checked;
         return provider;
       });
       return {...subscribeConfig, user_agent: userAgent, providers};
@@ -912,7 +921,7 @@
       if (empty) {
         empty.remove();
       }
-      subscriptionList.append(createProviderCard({interval: 86400, use_for_ai: true}));
+      subscriptionList.append(createProviderCard({interval: 86400, use_for_ai: true, use_for_latency: false}));
       setSubscribeStatus("请填写机场名称和订阅地址后保存。");
     });
 

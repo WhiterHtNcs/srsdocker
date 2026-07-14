@@ -62,12 +62,13 @@ srsdocker/
   "user_agent": "clash-verge/v2.4.5",   // 全局 UA，所有机场共用（YAML 锚点 x-ua）
   "providers": [
     { "name": "机场名", "url": "https://...", "interval": 86400 }
-    // 可选字段：use_for_ai（默认 true）；override.additional-prefix 给节点名加前缀（如 "Main："/"Minor："）
+    // 可选字段：use_for_ai（默认 true）；use_for_latency（默认 false）；override.additional-prefix 给节点名加前缀（如 "Main："/"Minor："）
   ]
 }
 ```
 - `user_agent` 支持字符串或字符串数组（数组会展开为多个 UA 列表项）
 - `providers[].use_for_ai` 为 `false` 时，该机场不会生成 AI 可选的“机场·国家”节点组
+- `providers[].use_for_latency` 为 `true` 时，该机场组为 `url-test`，自动选择延迟最低节点；否则为手动 `select`
 - 生成的 proxy-providers 用 YAML 锚点 `&x-ua` 去重 UA，每个 provider 用 `<<: *x-ua` 继承
 - **⚠️ 含真实订阅链接，绝不能提交 git，也不能在对话/输出中泄露 URL**
 
@@ -103,7 +104,7 @@ srsdocker/
 | 占位符 | 生成内容 | 典型位置 |
 |--------|---------|---------|
 | `__PROXY_PROVIDERS__` | 整个 `proxy-providers:` 块（含 x-ua 锚点 + 各机场） | prelude 顶部插入点 |
-| `__PROVIDER_GROUPS__` | 各机场的 select 策略组**定义**（`- name: X / type: select / use: [X]`） | proxy-groups 列表内 |
+| `__PROVIDER_GROUPS__` | 各机场策略组定义（按 `use_for_latency` 生成 `select` 或 `url-test`） | proxy-groups 列表内 |
 | `__PROVIDER_COUNTRY_GROUPS__` | 每个启用 AI 的“机场·国家”url-test 延迟测速组定义 | proxy-groups 列表内 |
 | `__PROVIDER_COUNTRY_NODES__` | 每个启用 AI 的“机场·国家”组名称列表 | AI 的 `proxies:` 下 |
 | `__ALLNODES__` | 机场名列表（`- 机场A / - 机场B ...`） | proxy-groups 的 `proxies:` 或 `use:` 下 |
@@ -125,7 +126,7 @@ srsdocker/
     __ALLNODES__          # 放 use: → 所有机场的所有节点直接平铺进本组
 ```
 
-原因：Clash 规定 `proxy-provider` 不能被 `proxies:` 直接引用，只能走 `use:`。而 `__PROVIDER_GROUPS__` 恰好生成了和机场同名的 select 组，所以 `proxies:` 下的机场名引用的是那个分组。
+原因：Clash 规定 `proxy-provider` 不能被 `proxies:` 直接引用，只能走 `use:`。而 `__PROVIDER_GROUPS__` 恰好生成了和机场同名的策略组，所以 `proxies:` 下的机场名引用的是那个分组。
 
 > 历史命名：此占位符原名 `__PROVIDERS__`（与 `__PROVIDER_GROUPS__` 太像，易混），已改为 `__ALLNODES__`。如见旧名，统一替换为新名。替换逻辑在 `app.py` `generate_full_openclash_config()` 内。
 

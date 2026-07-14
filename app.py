@@ -1672,6 +1672,10 @@ def validate_subscribe_data(payload):
         if not isinstance(use_for_ai, bool):
             raise ValueError(f"Provider {index} use_for_ai must be true or false.")
 
+        use_for_latency = provider.get("use_for_latency", False)
+        if not isinstance(use_for_latency, bool):
+            raise ValueError(f"Provider {index} use_for_latency must be true or false.")
+
         normalized_provider = dict(provider)
         normalized_provider.update(
             {
@@ -1679,6 +1683,7 @@ def validate_subscribe_data(payload):
                 "url": url,
                 "interval": interval,
                 "use_for_ai": use_for_ai,
+                "use_for_latency": use_for_latency,
             }
         )
         normalized_providers.append(normalized_provider)
@@ -1990,13 +1995,16 @@ def generate_full_openclash_config():
 
     if provider_names and "__PROVIDER_GROUPS__" in preamble:
         group_lines = []
-        for i, name in enumerate(provider_names):
+        for i, provider in enumerate(providers):
+            name = provider.get("name", "Unknown")
             if i == 0:
                 # First line inherits template indentation
                 group_lines.append(f"- name: {name}")
             else:
                 group_lines.append(f"  - name: {name}")
-            group_lines.append(f"    type: select")
+            group_lines.append("    type: url-test" if provider.get("use_for_latency", False) else "    type: select")
+            if provider.get("use_for_latency", False):
+                group_lines.append("    lazy: true")
             group_lines.append(f"    use:")
             group_lines.append(f"      - {name}")
         provider_groups_block = "\n".join(group_lines)
