@@ -5,6 +5,12 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>singbox-srs-generator</title>
   <style>
+    *,
+    *::before,
+    *::after {
+      box-sizing: border-box;
+    }
+
     :root {
       color-scheme: light;
       font-family: Arial, "Microsoft YaHei", sans-serif;
@@ -22,7 +28,33 @@
       padding: 20px 28px;
     }
 
+    .tabs {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-top: 16px;
+    }
+
+    .tab-button {
+      background: transparent;
+      border: 1px solid #7f8da7;
+      color: #dfe8f7;
+      padding: 8px 12px;
+    }
+
+    .tab-button:hover,
+    .tab-button.active {
+      background: #fff;
+      border-color: #fff;
+      color: #172033;
+    }
+
+    .tab-panel[hidden] {
+      display: none;
+    }
+
     main {
+      width: 100%;
       max-width: 1100px;
       margin: 0 auto;
       padding: 28px;
@@ -31,6 +63,7 @@
     }
 
     section {
+      min-width: 0;
       background: #fff;
       border: 1px solid #d9dfeb;
       border-radius: 8px;
@@ -83,6 +116,10 @@
       line-height: 1.45;
     }
 
+    .user-agent-input {
+      min-height: 84px;
+    }
+
     button {
       border: 0;
       border-radius: 6px;
@@ -128,10 +165,15 @@
       align-items: stretch;
     }
 
+    .rules-layout > * {
+      min-width: 0;
+    }
+
     .rules-panel {
       display: flex;
       flex-direction: column;
       min-height: 0;
+      width: 100%;
     }
 
     .rule-list {
@@ -139,8 +181,13 @@
       border-radius: 8px;
       flex: 1 1 auto;
       min-height: 0;
+      width: 100%;
       overflow-y: auto;
       overflow-x: hidden;
+    }
+
+    #ruleForm {
+      min-width: 0;
     }
 
     .rule-item {
@@ -242,6 +289,35 @@
       overflow-wrap: anywhere;
     }
 
+    .subscription-list {
+      display: grid;
+      gap: 14px;
+      margin-top: 16px;
+    }
+
+    .provider-card {
+      border: 1px solid #d9dfeb;
+      border-radius: 8px;
+      padding: 16px;
+    }
+
+    .provider-heading {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .provider-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(180px, 0.4fr);
+      gap: 0 14px;
+    }
+
+    .provider-grid .wide {
+      grid-column: 1 / -1;
+    }
+
     pre {
       background: #101828;
       color: #ecf2ff;
@@ -253,13 +329,23 @@
       overflow-wrap: anywhere;
     }
 
+    @media (max-width: 900px) {
+      .rules-layout {
+        grid-template-columns: 1fr;
+      }
+    }
+
     @media (max-width: 760px) {
       main {
         padding: 18px;
       }
 
-      .rules-layout {
+      .provider-grid {
         grid-template-columns: 1fr;
+      }
+
+      .provider-grid .wide {
+        grid-column: auto;
       }
     }
   </style>
@@ -267,10 +353,15 @@
 <body>
   <header>
     <h1>singbox-srs-generator</h1>
+    <nav class="tabs" aria-label="主导航">
+      <button class="tab-button active" type="button" data-tab="rules" role="tab" aria-selected="true">规则管理</button>
+      <button class="tab-button" type="button" data-tab="config" role="tab" aria-selected="false">配置</button>
+      <button class="tab-button" type="button" data-tab="subscribe" role="tab" aria-selected="false">订阅管理</button>
+    </nav>
   </header>
 
   <main>
-    <section>
+    <section class="tab-panel" data-tab-panel="rules">
       <h2>规则集管理</h2>
       <div class="rules-layout">
         <div class="rules-panel">
@@ -304,7 +395,7 @@
       </div>
     </section>
 
-    <section>
+    <section class="tab-panel" data-tab-panel="config" hidden>
       <h2>配置</h2>
       <label for="geositeUrl">geosite JSON 目录地址</label>
       <input id="geositeUrl" type="url" placeholder="https://api.github.com/repos/MetaCubeX/meta-rules-dat/contents/geo/geosite?ref=sing">
@@ -334,6 +425,24 @@
       </div>
       <pre id="remoteOutput">尚未同步</pre>
     </section>
+
+    <section class="tab-panel" data-tab-panel="subscribe" hidden>
+      <h2>订阅管理</h2>
+      <p class="hint">订阅地址属于敏感信息，仅在此设备的浏览器与本服务之间读取和保存。请勿将 Web UI 暴露到不可信网络。</p>
+
+      <label for="subscribeUserAgent">全局 User-Agent</label>
+      <textarea id="subscribeUserAgent" class="user-agent-input" placeholder="每行一个 User-Agent；留空则不设置。"></textarea>
+      <p class="hint">填写多行时会保存为 User-Agent 数组。</p>
+
+      <div class="actions">
+        <button id="addProviderBtn" type="button">添加机场</button>
+        <button id="saveSubscribeBtn" type="button">保存订阅</button>
+        <button id="reloadSubscribeBtn" class="secondary" type="button">重新加载</button>
+      </div>
+
+      <div id="subscriptionList" class="subscription-list" aria-live="polite"></div>
+      <div id="subscribeStatus" class="status"></div>
+    </section>
   </main>
 
   <script>
@@ -344,6 +453,12 @@
     const autoUpdateEnabled = document.querySelector("#autoUpdateEnabled");
     const autoUpdateCron = document.querySelector("#autoUpdateCron");
     const remoteOutput = document.querySelector("#remoteOutput");
+    const subscribeUserAgent = document.querySelector("#subscribeUserAgent");
+    const subscriptionList = document.querySelector("#subscriptionList");
+    const subscribeStatus = document.querySelector("#subscribeStatus");
+    const addProviderBtn = document.querySelector("#addProviderBtn");
+    const saveSubscribeBtn = document.querySelector("#saveSubscribeBtn");
+    const reloadSubscribeBtn = document.querySelector("#reloadSubscribeBtn");
     const ruleList = document.querySelector("#ruleList");
     const ruleName = document.querySelector("#ruleName");
     const ruleContent = document.querySelector("#ruleContent");
@@ -358,9 +473,25 @@
 
     let rules = [];
     let selectedRuleName = "";
+    let subscribeConfig = {user_agent: "", providers: []};
 
     function setStatus(message) {
       statusText.textContent = message;
+    }
+
+    function setSubscribeStatus(message) {
+      subscribeStatus.textContent = message;
+    }
+
+    function switchTab(tabName) {
+      document.querySelectorAll("[data-tab]").forEach((button) => {
+        const active = button.dataset.tab === tabName;
+        button.classList.toggle("active", active);
+        button.setAttribute("aria-selected", String(active));
+      });
+      document.querySelectorAll("[data-tab-panel]").forEach((panel) => {
+        panel.hidden = panel.dataset.tabPanel !== tabName;
+      });
     }
 
     function showGenerateResult(data) {
@@ -438,6 +569,121 @@
       const result = await postJson("/api/remote/update", {});
       showRemoteResult(result);
       setStatus(result.ok ? "已引用的远程 JSON 规则已同步。" : "远程 JSON 规则同步失败。");
+    }
+
+    function formatUserAgent(value) {
+      return Array.isArray(value) ? value.join("\n") : (value || "");
+    }
+
+    function createProviderInput(labelText, type, value, className = "") {
+      const field = document.createElement("div");
+      field.className = className;
+      const label = document.createElement("label");
+      label.textContent = labelText;
+      const input = document.createElement("input");
+      input.type = type;
+      input.value = value;
+      field.append(label, input);
+      return {field, input};
+    }
+
+    function createProviderCard(provider = {}) {
+      const card = document.createElement("article");
+      card.className = "provider-card";
+      card.provider = provider;
+
+      const heading = document.createElement("div");
+      heading.className = "provider-heading";
+      const title = document.createElement("h3");
+      title.textContent = "机场订阅";
+      const removeButton = document.createElement("button");
+      removeButton.type = "button";
+      removeButton.className = "danger";
+      removeButton.textContent = "删除";
+      removeButton.addEventListener("click", () => card.remove());
+      heading.append(title, removeButton);
+
+      const grid = document.createElement("div");
+      grid.className = "provider-grid";
+      const name = createProviderInput("名称", "text", provider.name || "");
+      name.input.required = true;
+      name.input.placeholder = "机场名称";
+      name.input.dataset.field = "name";
+
+      const interval = createProviderInput("更新间隔（秒）", "number", String(provider.interval || 86400));
+      interval.input.min = "60";
+      interval.input.max = "2592000";
+      interval.input.step = "1";
+      interval.input.required = true;
+      interval.input.dataset.field = "interval";
+
+      const url = createProviderInput("订阅地址", "url", provider.url || "", "wide");
+      url.input.required = true;
+      url.input.placeholder = "https://example.com/subscribe";
+      url.input.dataset.field = "url";
+
+      const aiField = document.createElement("label");
+      aiField.className = "check-row wide";
+      const useForAi = document.createElement("input");
+      useForAi.type = "checkbox";
+      useForAi.checked = provider.use_for_ai !== false;
+      useForAi.dataset.field = "use_for_ai";
+      aiField.append(useForAi, document.createTextNode("用于 AI 策略组"));
+
+      grid.append(name.field, interval.field, url.field, aiField);
+      card.append(heading, grid);
+      return card;
+    }
+
+    function renderSubscriptions() {
+      subscriptionList.replaceChildren();
+      const providers = Array.isArray(subscribeConfig.providers) ? subscribeConfig.providers : [];
+      if (providers.length === 0) {
+        const empty = document.createElement("div");
+        empty.className = "empty";
+        empty.textContent = "暂无机场订阅，可点击“添加机场”。";
+        subscriptionList.append(empty);
+        return;
+      }
+      providers.forEach((provider) => subscriptionList.append(createProviderCard(provider)));
+    }
+
+    function collectSubscribeConfig() {
+      const userAgents = subscribeUserAgent.value
+        .split(/\r?\n/)
+        .map((item) => item.trim())
+        .filter(Boolean);
+      const userAgent = userAgents.length <= 1 ? (userAgents[0] || "") : userAgents;
+      const providers = [...subscriptionList.querySelectorAll(".provider-card")].map((card) => {
+        const provider = {...(card.provider || {})};
+        provider.name = card.querySelector('[data-field="name"]').value.trim();
+        provider.url = card.querySelector('[data-field="url"]').value.trim();
+        provider.interval = Number(card.querySelector('[data-field="interval"]').value);
+        provider.use_for_ai = card.querySelector('[data-field="use_for_ai"]').checked;
+        return provider;
+      });
+      return {...subscribeConfig, user_agent: userAgent, providers};
+    }
+
+    async function loadSubscriptions() {
+      const data = await requestJson("/api/subscribe");
+      subscribeConfig = data.subscribe || {user_agent: "", providers: []};
+      subscribeUserAgent.value = formatUserAgent(subscribeConfig.user_agent);
+      renderSubscriptions();
+    }
+
+    async function saveSubscriptions() {
+      const payload = collectSubscribeConfig();
+      saveSubscribeBtn.disabled = true;
+      try {
+        const result = await postJson("/api/subscribe", payload);
+        subscribeConfig = result.subscribe || payload;
+        subscribeUserAgent.value = formatUserAgent(subscribeConfig.user_agent);
+        renderSubscriptions();
+        setSubscribeStatus(`订阅已保存到 ${result.subscribe_path || "subscribe.json"}。`);
+      } finally {
+        saveSubscribeBtn.disabled = false;
+      }
     }
 
     function renderRules() {
@@ -657,6 +903,27 @@
       updateRemoteRules().catch((error) => setStatus(error.message));
     });
 
+    document.querySelectorAll("[data-tab]").forEach((button) => {
+      button.addEventListener("click", () => switchTab(button.dataset.tab));
+    });
+
+    addProviderBtn.addEventListener("click", () => {
+      const empty = subscriptionList.querySelector(".empty");
+      if (empty) {
+        empty.remove();
+      }
+      subscriptionList.append(createProviderCard({interval: 86400, use_for_ai: true}));
+      setSubscribeStatus("请填写机场名称和订阅地址后保存。");
+    });
+
+    saveSubscribeBtn.addEventListener("click", () => {
+      saveSubscriptions().catch((error) => setSubscribeStatus(error.message));
+    });
+
+    reloadSubscribeBtn.addEventListener("click", () => {
+      loadSubscriptions().then(() => setSubscribeStatus("订阅已重新加载。")).catch((error) => setSubscribeStatus(error.message));
+    });
+
     document.querySelector("#loadRulesBtn").addEventListener("click", () => {
       loadRules().then(() => setStatus("规则集列表已刷新。")).catch((error) => setStatus(error.message));
     });
@@ -684,7 +951,7 @@
       generateOpenClashRules().catch((error) => setStatus(error.message));
     });
 
-    Promise.all([loadConfig(), loadRules()]).catch((error) => setStatus(error.message));
+    Promise.all([loadConfig(), loadRules(), loadSubscriptions()]).catch((error) => setStatus(error.message));
   </script>
 </body>
 </html>

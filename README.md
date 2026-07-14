@@ -4,13 +4,13 @@
 
 ## 功能
 
-- **规则集管理**：新建、编辑、删除、查看、手动排序 `rules/*.txt`
+- **规则集管理**：新建、编辑、删除、查看、手动排序 `mapping/rules/*.txt`
 - **规则转换**：生成 sing-box JSON 规则文件
 - **SRS 生成**：调用 `sing-box rule-set compile` 生成 `.srs`
 - **OpenClash 完整配置生成**：
-  - 从 `config/subscribe.json` 读取多机场订阅，生成 `proxy-providers`
-  - 从 `config/template.yaml` 读取策略组结构，自动填充提供商列表
-  - 从 `rules/*.txt` 读取规则，内联到 `rules:` 节（无需外部文件引用）
+  - 从 `mapping/config/subscribe.json` 读取多机场订阅，生成 `proxy-providers`
+  - 从 `mapping/config/template.yaml` 读取策略组结构，自动填充提供商列表
+  - 从 `mapping/rules/*.txt` 读取规则，内联到 `rules:` 节（无需外部文件引用）
   - IP 规则自动合并（`Direct.txt` + `DirectIP.txt` → `Direct`）
   - 每条规则类别自动生成独立 select 策略组，可手动选节点
 - **远程规则同步**：按规则集中使用到的 `geosite:` / `geoip:` 下载对应 JSON
@@ -23,29 +23,19 @@
 ```text
 .
 |-- app.py                 # 后端 HTTP 服务
-|-- bin/                   # sing-box 二进制文件
-|   |-- sing-box           # Linux
-|   `-- sing-box.exe       # Windows
-|-- config/
-|   |-- config.json        # 配置文件
-|   |-- subscribe.json     # 机场订阅配置（私人，不提交 Git）
-|   |-- template.yaml      # OpenClash 配置模板（私人，不提交 Git）
-|   |-- order.json         # 规则集手动排序
-|   |-- .env               # Docker 环境变量
-|   `-- .env.example       # 环境变量示例
 |-- Dockerfile
 |-- docker-compose.yml
 |-- docker/
 |   `-- entrypoint.sh      # 容器启动与 cron 初始化
-|-- rules/                 # 用户规则 txt
-|-- rules-dat/             # 下载的 geosite / geoip JSON
-|   |-- geosite/
-|   `-- geoip/
-|-- rule-set/              # 生成的输出
-|   |-- srs/               # 生成的 SRS 文件
-|   `-- openclash/         # 生成的 OpenClash 配置
-|       |-- openclash.yaml     # 完整配置（可直接上传 OpenClash）
-|       `-- providers/         # 古典文本规则文件（可选引用）
+|-- mapping/               # 运行时数据（gitignored）
+|   |-- bin/               # sing-box 二进制文件
+|   |-- config/            # config.json、subscribe.json、template.yaml、ports.json、.env
+|   |-- rules/             # 用户规则 txt
+|   |-- rules-dat/         # 下载的 geosite / geoip JSON
+|   `-- rule-set/
+|       |-- srs/           # 生成的 SRS 文件
+|       `-- openclash/
+|           `-- openclash.yaml # 完整配置（可直接上传 OpenClash）
 |-- web/
 |   `-- index.html         # 前端页面
 `-- .gitignore
@@ -56,11 +46,12 @@
 ### Docker Compose
 
 ```bash
-# 1. 编辑机场订阅配置
-vim config/subscribe.json    # 填入真实的订阅 URL
+# 1. 准备运行时目录及私人配置（不会提交 Git）
+mkdir -p mapping/config mapping/rules mapping/bin
+vim mapping/config/subscribe.json    # 填入真实的订阅 URL
 
 # 2. 编辑 OpenClash 模板（按需调整策略组和规则映射）
-vim config/template.yaml
+vim mapping/config/template.yaml
 
 # 3. 启动服务
 docker compose up -d
@@ -77,7 +68,7 @@ python app.py
 
 ## 配置说明
 
-### `config/subscribe.json`
+### `mapping/config/subscribe.json`
 
 记录机场订阅信息，**私人配置，不提交 Git**：
 
@@ -92,6 +83,7 @@ python app.py
       "name": "YToo_Trojan",
       "url": "https://your-subscribe-url",
       "interval": 86400,
+      "use_for_ai": true,
       "override": {
         "additional-prefix": "Main："
       }
@@ -107,9 +99,10 @@ python app.py
 | `providers[].url` | 订阅地址 |
 | `providers[].interval` | 更新间隔（秒，默认 86400） |
 | `providers[].health_check` | 可选，健康检查配置 |
+| `providers[].use_for_ai` | 是否加入 AI 策略组，默认 `true` |
 | `providers[].override.additional-prefix` | 节点名前缀 |
 
-### `config/template.yaml`
+### `mapping/config/template.yaml`
 
 OpenClash 配置模板，**私人配置，不提交 Git**。包含：
 - 基础设置（端口、DNS、Sniffer 等）
@@ -121,8 +114,13 @@ OpenClash 配置模板，**私人配置，不提交 Git**。包含：
 
 | 占位符 | 替换为 |
 |--------|--------|
-| `__PROVIDERS__` | subscribe.json 中的提供商名称列表 |
-| `__PROVIDER_GROUPS__` | 各提供商对应的 select 策略组 |
+| `__ALLNODES__` | 全部节点（机场名列表，放 `proxies:` 引用机场组，放 `use:` 平铺所有节点） |
+| `__PROVIDER_GROUPS__` | 各机场对应的 select 策略组定义（机场组） |
+| `__PROVIDER_COUNTRY_GROUPS__` | 所有“机场·国家”节点筛选组定义 |
+| `__PROVIDER_COUNTRY_NODES__` | 所有“机场·国家”组名称列表，可嵌入策略组的 `proxies:` |
+| `__AI_AUTO_TEST_GROUPS__` | 仅由 AI 机场组成的延迟测速组定义 |
+| `__AI_AUTO_TEST_NODES__` | AI 延迟测速组名称列表，可嵌入 AI 的 `proxies:` |
+| `__AI_PROVIDERS__` | 已启用 AI 的机场名列表，可嵌入 AI 的 `proxies:` 或 `use:` |
 | `__RULE_GROUPS__` | 各规则类别对应的 select 策略组（rule_mapping 中值=键的条目） |
 | `__PROXY_PROVIDERS__` | proxy-providers 插入位置 |
 
@@ -150,9 +148,9 @@ generate_all_openclash_rules()
   └── 调用 generate_full_openclash_config()
         ├── 读取 template.yaml → base settings + proxy-groups + rule_mapping
         ├── 读取 subscribe.json → proxy-providers
-        ├── 替换占位符（__PROVIDERS__ 等）
-        ├── 生成内联 rules（从 rules/*.txt + rule_mapping）
-        └── 写入 rule-set/openclash/openclash.yaml（完整配置）
+        ├── 替换占位符（__ALLNODES__ 等）
+        ├── 生成内联 rules（从 mapping/rules/*.txt + rule_mapping）
+        └── 写入 mapping/rule-set/openclash/openclash.yaml（完整配置）
 ```
 
 ### 输出说明
@@ -167,18 +165,21 @@ generate_all_openclash_rules()
 
 | 路径 | 方法 | 说明 |
 |------|------|------|
+| `/api/config` | GET / POST | 获取或更新远程规则与定时任务配置 |
+| `/api/subscribe` | GET / POST | 获取或保存机场订阅、全局 User-Agent 与 AI 开关 |
 | `/api/rules` | GET | 获取规则列表 |
-| `/api/rules/generate` | POST | 手动触发规则生成 |
-| `/api/rules/update-rules` | POST | 更新远程规则源 |
-| `/api/rules/srs-files` | GET | 获取所有 SRS 文件列表 |
+| `/api/rules/order` | GET / POST | 获取或更新规则显示顺序 |
+| `/api/rules/create`、`/api/rules/update`、`/api/rules/delete` | POST | 管理规则文件 |
+| `/api/generate`、`/api/generate/all` | POST | 生成一个或全部 SRS 规则集 |
+| `/api/srs` | GET | 获取生成的 SRS 文件列表 |
+| `/api/remote/status`、`/api/remote/update` | GET / POST | 查看或更新远程规则源 |
 | `/api/generate/openclash/all` | POST | 生成完整 OpenClash 配置 |
-| `/api/health` | GET | 健康检查 |
 
 ## OpenClash 使用方式
 
 ### 方式一：上传完整配置（推荐）
 
-将生成的 `rule-set/openclash/openclash.yaml` 上传到 OpenClash → 配置文件管理 → 导入。所有设置（订阅、策略组、规则）内联在单个文件中。
+将生成的 `mapping/rule-set/openclash/openclash.yaml` 上传到 OpenClash → 配置文件管理 → 导入。所有设置（订阅、策略组、规则）内联在单个文件中。
 
 ### 方式二：引用规则文件
 
@@ -197,11 +198,11 @@ rule-providers:
 
 ### 添加新机场
 
-1. 在 `config/subscribe.json` 的 `providers` 数组中添加条目
-2. 如果模板策略组需要引用新提供商，`template.yaml` 中 `__PROVIDERS__` 会自动展开
+1. 在 `mapping/config/subscribe.json` 的 `providers` 数组中添加条目
+2. 如果模板策略组需要引用新提供商，`mapping/config/template.yaml` 中 `__ALLNODES__` 会自动展开
 
 ### 添加新规则
 
-1. 在 `rules/` 目录创建 `xxx.txt`
-2. 在 `template.yaml` 的 `rule_mapping` 中添加对应条目
+1. 在 `mapping/rules/` 目录创建 `xxx.txt`
+2. 在 `mapping/config/template.yaml` 的 `rule_mapping` 中添加对应条目
 3. 重新生成 OpenClash 配置

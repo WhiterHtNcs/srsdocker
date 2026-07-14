@@ -5,7 +5,9 @@ services:
     container_name: srsdocker
     network_mode: bridge
     env_file:
-      - ./mapping/config/.env
+      # Runtime configuration is gitignored, so this file is optional on a fresh clone.
+      - path: ./mapping/config/.env
+        required: false
     ports:
       - "9044:9044"
     volumes:

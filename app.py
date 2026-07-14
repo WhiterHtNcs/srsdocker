@@ -45,6 +45,7 @@ MAX_JSON_BODY_BYTES = 1024 * 1024
 CONFIG_LOCK = threading.RLock()
 RULES_LOCK = threading.RLock()
 RULES_DAT_LOCK = threading.RLock()
+SUBSCRIBE_LOCK = threading.RLock()
 GENERATE_LOCK = threading.Lock()
 REMOTE_UPDATE_LOCK = threading.Lock()
 
@@ -62,6 +63,17 @@ GEO_CODE_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.!@+\-]{0,127}$")
 CRON_FIELD_PATTERN = re.compile(r"^[A-Za-z0-9*/,\-]+$")
 DOMAIN_LIKE_PATTERN = re.compile(r"^(?=.{1,253}$)(?!-)[A-Za-z0-9_.*-]+(?:\.[A-Za-z0-9_.*-]+)+\.?$")
 KEYWORD_LIKE_PATTERN = re.compile(r"^[A-Za-z0-9_.!@+*-]+$")
+PROVIDER_NAME_PATTERN = re.compile(r"^[^\r\n:#{}\[\],&*!|>'\"%@`]{1,128}$")
+
+COUNTRY_NODE_FILTERS = (
+    (
+        "美国",
+        r"(?i)(美国|美國|\bUS\b|\bUSA\b|United States|洛杉矶|洛杉磯|圣何塞|聖何塞|西雅图|西雅圖|纽约|紐約|芝加哥|达拉斯|達拉斯)",
+    ),
+    ("新加坡", r"(?i)(新加坡|狮城|獅城|\bSG\b|Singapore)"),
+    ("台湾", r"(?i)(台湾|台灣|\bTW\b|Taiwan|台北|臺北|新北|高雄|台中|臺中)"),
+    ("日本", r"(?i)(日本|\bJP\b|Japan|东京|東京|大阪|札幌|川崎)"),
+)
 
 
 class RuleConversionError(Exception):
@@ -1607,6 +1619,104 @@ def load_subscribe_config():
         return [], None
 
 
+def load_subscribe_data():
+    """Read the full editable subscription configuration for the web UI."""
+    with SUBSCRIBE_LOCK:
+        if not SUBSCRIBE_PATH.exists():
+            return {"user_agent": "", "providers": []}
+        try:
+            data = json.loads(SUBSCRIBE_PATH.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as error:
+            raise ValueError(f"Unable to read subscribe.json: {error}") from error
+
+    if not isinstance(data, dict):
+        raise ValueError("subscribe.json must contain a JSON object.")
+    return data
+
+
+def validate_subscribe_data(payload):
+    """Validate editable subscription data while preserving supported extra fields."""
+    if not isinstance(payload, dict):
+        raise ValueError("Subscription configuration must be an object.")
+
+    normalized = dict(payload)
+    user_agent = payload.get("user_agent", "")
+    if isinstance(user_agent, str):
+        normalized_user_agent = user_agent.strip()
+        if len(normalized_user_agent) > 1024:
+            raise ValueError("User-Agent is too long.")
+    elif isinstance(user_agent, list):
+        if len(user_agent) > 20 or not all(isinstance(item, str) and item.strip() for item in user_agent):
+            raise ValueError("User-Agent list must contain at most 20 non-empty strings.")
+        normalized_user_agent = [item.strip() for item in user_agent]
+    else:
+        raise ValueError("User-Agent must be a string or a list of strings.")
+
+    providers = payload.get("providers", [])
+    if not isinstance(providers, list) or len(providers) > 100:
+        raise ValueError("providers must be a list containing at most 100 items.")
+
+    normalized_providers = []
+    provider_names = set()
+    for index, provider in enumerate(providers, start=1):
+        if not isinstance(provider, dict):
+            raise ValueError(f"Provider {index} must be an object.")
+
+        name = provider.get("name", "")
+        url = provider.get("url", "")
+        if not isinstance(name, str) or not PROVIDER_NAME_PATTERN.fullmatch(name.strip()):
+            raise ValueError(f"Provider {index} has an invalid name.")
+        if not isinstance(url, str):
+            raise ValueError(f"Provider {index} URL must be a string.")
+
+        name = name.strip()
+        url = url.strip()
+        parsed_url = urlparse(url)
+        if parsed_url.scheme not in ("http", "https") or not parsed_url.netloc:
+            raise ValueError(f"Provider {index} URL must be a valid HTTP(S) URL.")
+        if name in provider_names:
+            raise ValueError(f"Provider name '{name}' is duplicated.")
+        provider_names.add(name)
+
+        interval = provider.get("interval", 86400)
+        if isinstance(interval, bool):
+            raise ValueError(f"Provider {index} interval must be a number.")
+        try:
+            interval = int(interval)
+        except (TypeError, ValueError) as error:
+            raise ValueError(f"Provider {index} interval must be a number.") from error
+        if not 60 <= interval <= 2_592_000:
+            raise ValueError(f"Provider {index} interval must be between 60 and 2592000 seconds.")
+
+        use_for_ai = provider.get("use_for_ai", True)
+        if not isinstance(use_for_ai, bool):
+            raise ValueError(f"Provider {index} use_for_ai must be true or false.")
+
+        normalized_provider = dict(provider)
+        normalized_provider.update(
+            {
+                "name": name,
+                "url": url,
+                "interval": interval,
+                "use_for_ai": use_for_ai,
+            }
+        )
+        normalized_providers.append(normalized_provider)
+
+    normalized["user_agent"] = normalized_user_agent
+    normalized["providers"] = normalized_providers
+    return normalized
+
+
+def save_subscribe_data(data):
+    """Atomically save the editable subscription configuration."""
+    with SUBSCRIBE_LOCK:
+        write_text_file_atomic(
+            SUBSCRIBE_PATH,
+            json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+        )
+
+
 def generate_proxy_providers_yaml(providers, global_user_agent=None):
     """Generate proxy-providers YAML section from subscribe.json providers list."""
 
@@ -1684,6 +1794,85 @@ def generate_proxy_providers_yaml(providers, global_user_agent=None):
         lines.append(f"    url: {sanitize_yaml_string(url)}")
 
     return "\n".join(lines) + "\n"
+
+
+def get_provider_country_groups(providers):
+    """Return (group_name, provider_name, filter) tuples for every airport/country pair."""
+    return [
+        (f"{provider.get('name', 'Unknown')}·{country}", provider.get("name", "Unknown"), node_filter)
+        for country, node_filter in COUNTRY_NODE_FILTERS
+        for provider in providers
+    ]
+
+
+def get_ai_providers(providers):
+    """Return providers enabled for the AI policy group (enabled by default)."""
+    return [provider for provider in providers if provider.get("use_for_ai", True)]
+
+
+def generate_provider_country_groups_yaml(providers):
+    """Generate select groups that filter one provider to one country/region."""
+    groups = get_provider_country_groups(providers)
+    lines = []
+    for index, (group_name, provider_name, node_filter) in enumerate(groups):
+        if index:
+            lines.append("")
+        prefix = "- name" if index == 0 else "  - name"
+        lines.extend(
+            [
+                f"{prefix}: {group_name}",
+                "    type: select",
+                "    use:",
+                f"      - {provider_name}",
+                f"    filter: '{node_filter}'",
+            ]
+        )
+    return "\n".join(lines)
+
+
+def generate_provider_country_references_yaml(providers):
+    """Generate proxy-group references for every airport/country pair."""
+    names = [group_name for group_name, _, _ in get_provider_country_groups(providers)]
+    if not names:
+        return ""
+    return "\n".join([f"- {names[0]}", *[f"      - {name}" for name in names[1:]]])
+
+
+def generate_ai_auto_test_groups_yaml(providers):
+    """Generate AI-only latency groups for all nodes and each country/region."""
+    provider_names = [provider.get("name", "Unknown") for provider in providers]
+    if not provider_names:
+        return ""
+
+    group_specs = [("AI·延迟最低", None)] + [
+        (f"AI·{country}", node_filter) for country, node_filter in COUNTRY_NODE_FILTERS
+    ]
+    lines = []
+    for index, (group_name, node_filter) in enumerate(group_specs):
+        if index:
+            lines.append("")
+        prefix = "- name" if index == 0 else "  - name"
+        lines.extend(
+            [
+                f"{prefix}: {group_name}",
+                "    type: url-test",
+                "    lazy: true",
+                "    use:",
+                f"      - {provider_names[0]}",
+                *[f"      - {provider_name}" for provider_name in provider_names[1:]],
+            ]
+        )
+        if node_filter:
+            lines.append(f"    filter: '{node_filter}'")
+    return "\n".join(lines)
+
+
+def generate_ai_auto_test_references_yaml(providers):
+    """Generate AI-only latency group references for the AI policy group."""
+    if not providers:
+        return ""
+    names = ["AI·延迟最低", *[f"AI·{country}" for country, _ in COUNTRY_NODE_FILTERS]]
+    return "\n".join([f"- {names[0]}", *[f"      - {name}" for name in names[1:]]])
 
 
 def read_template():
@@ -1844,15 +2033,16 @@ def generate_full_openclash_config():
     # Step 2: Load subscriptions
     providers, global_ua = load_subscribe_config()
 
-    # Step 2.5: Replace __PROVIDERS__ and __PROVIDER_GROUPS__ placeholders
+    # Step 2.5: Replace provider-related placeholders
     provider_names = [p.get("name", "Unknown") for p in providers]
+    ai_providers = get_ai_providers(providers)
     preamble = template["preamble"]
-    if provider_names and "__PROVIDERS__" in preamble:
-        # First line inherits indentation from where __PROVIDERS__ sits in the template
+    if provider_names and "__ALLNODES__" in preamble:
+        # First line inherits indentation from where __ALLNODES__ sits in the template
         provider_lines = [f"- {provider_names[0]}"]
         provider_lines += [f"      - {name}" for name in provider_names[1:]]
         providers_yaml_block = "\n".join(provider_lines)
-        preamble = preamble.replace("__PROVIDERS__", providers_yaml_block)
+        preamble = preamble.replace("__ALLNODES__", providers_yaml_block)
 
     if provider_names and "__PROVIDER_GROUPS__" in preamble:
         group_lines = []
@@ -1867,6 +2057,34 @@ def generate_full_openclash_config():
             group_lines.append(f"      - {name}")
         provider_groups_block = "\n".join(group_lines)
         preamble = preamble.replace("__PROVIDER_GROUPS__", provider_groups_block)
+
+    if provider_names and "__PROVIDER_COUNTRY_GROUPS__" in preamble:
+        preamble = preamble.replace(
+            "__PROVIDER_COUNTRY_GROUPS__", generate_provider_country_groups_yaml(ai_providers)
+        )
+
+    if provider_names and "__PROVIDER_COUNTRY_NODES__" in preamble:
+        preamble = preamble.replace(
+            "__PROVIDER_COUNTRY_NODES__", generate_provider_country_references_yaml(ai_providers)
+        )
+
+    if "__AI_AUTO_TEST_GROUPS__" in preamble:
+        preamble = preamble.replace(
+            "__AI_AUTO_TEST_GROUPS__", generate_ai_auto_test_groups_yaml(ai_providers)
+        )
+
+    if "__AI_AUTO_TEST_NODES__" in preamble:
+        preamble = preamble.replace(
+            "__AI_AUTO_TEST_NODES__", generate_ai_auto_test_references_yaml(ai_providers)
+        )
+
+    if "__AI_PROVIDERS__" in preamble:
+        ai_provider_lines = []
+        if ai_providers:
+            ai_provider_names = [provider.get("name", "Unknown") for provider in ai_providers]
+            ai_provider_lines = [f"- {ai_provider_names[0]}"]
+            ai_provider_lines += [f"      - {name}" for name in ai_provider_names[1:]]
+        preamble = preamble.replace("__AI_PROVIDERS__", "\n".join(ai_provider_lines))
 
     if "__RULE_GROUPS__" in preamble:
         rule_group_lines = []
@@ -1952,6 +2170,13 @@ class AppHandler(SimpleHTTPRequestHandler):
             self.send_json(public_config(load_config()))
             return
 
+        if parsed.path == "/api/subscribe":
+            try:
+                self.send_json({"subscribe": load_subscribe_data(), "subscribe_path": str(SUBSCRIBE_PATH)})
+            except ValueError as error:
+                self.send_json({"error": str(error)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
+
         if parsed.path == "/api/rules":
             self.send_json({"rules": list_rules()})
             return
@@ -2014,6 +2239,28 @@ class AppHandler(SimpleHTTPRequestHandler):
             except OSError as error:
                 response["cron_warning"] = str(error)
             self.send_json(response)
+            return
+
+        if parsed.path == "/api/subscribe":
+            payload = self.read_json_body()
+            if payload is None:
+                return
+            try:
+                subscribe_data = validate_subscribe_data(payload)
+                save_subscribe_data(subscribe_data)
+            except ValueError as error:
+                self.send_json({"error": str(error)}, status=HTTPStatus.BAD_REQUEST)
+                return
+            except OSError as error:
+                self.send_json({"error": str(error)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+                return
+            self.send_json(
+                {
+                    "ok": True,
+                    "subscribe": subscribe_data,
+                    "subscribe_path": str(SUBSCRIBE_PATH),
+                }
+            )
             return
 
         if parsed.path == "/api/rules/create":
@@ -2231,6 +2478,7 @@ class AppHandler(SimpleHTTPRequestHandler):
         body = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
