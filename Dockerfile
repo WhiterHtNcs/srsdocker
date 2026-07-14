@@ -11,7 +11,7 @@ COPY web ./web
 COPY docker/entrypoint.sh /entrypoint.sh
 
 RUN chmod +x /entrypoint.sh \
-    && mkdir -p /app/mapping/bin /app/mapping/config /app/mapping/rules /app/mapping/rules-dat/geosite /app/mapping/rules-dat/geoip /app/mapping/rule-set/srs /app/mapping/rule-set/openclash /app/mapping/rule-set/openclash/providers
+    && mkdir -p /app/mapping/bin /app/mapping/config /app/mapping/rules /app/mapping/rules-dat/geosite /app/mapping/rules-dat/geoip /app/mapping/rule-set/srs /app/mapping/rule-set/openclash
 
 EXPOSE 9044
 

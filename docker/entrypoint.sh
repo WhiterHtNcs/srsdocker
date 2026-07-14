@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-mkdir -p /app/mapping/bin /app/mapping/config /app/mapping/rules /app/mapping/rules-dat/geosite /app/mapping/rules-dat/geoip /app/mapping/rule-set/srs /app/mapping/rule-set/openclash /app/mapping/rule-set/openclash/providers
+mkdir -p /app/mapping/bin /app/mapping/config /app/mapping/rules /app/mapping/rules-dat/geosite /app/mapping/rules-dat/geoip /app/mapping/rule-set/srs /app/mapping/rule-set/openclash
 chmod +x /app/mapping/bin/sing-box 2>/dev/null || true
 
 CRON_FILE=/etc/cron.d/singbox-srs-generator

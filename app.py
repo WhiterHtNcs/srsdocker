@@ -31,7 +31,6 @@ RULES_DIR = MAPPING_DIR / "rules"
 RULE_SET_DIR = MAPPING_DIR / "rule-set"
 SRS_DIR = RULE_SET_DIR / "srs"
 OPENCLASH_DIR = RULE_SET_DIR / "openclash"
-PROVIDERS_DIR = OPENCLASH_DIR / "providers"
 OPENCLASH_ALL_FILENAME = "openclash.yaml"
 TEMPLATE_PATH = MAPPING_DIR / "config" / "template.yaml"
 SUBSCRIBE_PATH = MAPPING_DIR / "config" / "subscribe.json"
@@ -89,7 +88,6 @@ def ensure_directories():
     RULE_SET_DIR.mkdir(exist_ok=True)
     SRS_DIR.mkdir(exist_ok=True)
     OPENCLASH_DIR.mkdir(exist_ok=True)
-    PROVIDERS_DIR.mkdir(exist_ok=True)
     (RULES_DAT_DIR / "geosite").mkdir(parents=True, exist_ok=True)
     (RULES_DAT_DIR / "geoip").mkdir(parents=True, exist_ok=True)
     WEB_DIR.mkdir(exist_ok=True)
@@ -411,20 +409,6 @@ def list_srs_files():
         )
 
     for path in sorted(OPENCLASH_DIR.glob("*.yaml"), key=lambda item: item.name.lower()):
-        if not path.is_file():
-            continue
-
-        stat = path.stat()
-        files.append(
-            {
-                "filename": path.name,
-                "path": str(path.relative_to(BASE_DIR)),
-                "size": stat.st_size,
-                "modified": stat.st_mtime,
-            }
-        )
-
-    for path in sorted(PROVIDERS_DIR.glob("*.list"), key=lambda item: item.name.lower()):
         if not path.is_file():
             continue
 
@@ -1519,10 +1503,6 @@ def generate_all_openclash_rules():
 
     # Build merge map: XIP rules that should be merged into their base X
     _, ip_skip_rules = get_merged_rule_names(rules)
-
-    # Clean stale .list files from previous generation
-    for old_file in PROVIDERS_DIR.glob("*.list"):
-        old_file.unlink(missing_ok=True)
 
     for rule in rules:
         try:

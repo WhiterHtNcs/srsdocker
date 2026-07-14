@@ -144,7 +144,6 @@ rule_mapping:
         ▼
 generate_all_openclash_rules()
   ├── 规则合并：X.txt + XIP.txt → X（自动合并 IP 规则）
-  ├── 生成 .list 古典文本文件（可选，用于外部引用）
   └── 调用 generate_full_openclash_config()
         ├── 读取 template.yaml → base settings + proxy-groups + rule_mapping
         ├── 读取 subscribe.json → proxy-providers
@@ -177,22 +176,9 @@ generate_all_openclash_rules()
 
 ## OpenClash 使用方式
 
-### 方式一：上传完整配置（推荐）
+### 上传完整配置
 
 将生成的 `mapping/rule-set/openclash/openclash.yaml` 上传到 OpenClash → 配置文件管理 → 导入。所有设置（订阅、策略组、规则）内联在单个文件中。
-
-### 方式二：引用规则文件
-
-在 Luci 面板的「配置文件覆写」→「规则集」中添加：
-
-```yaml
-rule-providers:
-  Direct:
-    type: file
-    behavior: classical
-    format: text
-    path: ./rule-set/openclash/providers/Direct.list
-```
 
 ## 维护说明
 
