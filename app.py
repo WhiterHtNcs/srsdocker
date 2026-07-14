@@ -1356,15 +1356,39 @@ def convert_to_srs(rule_lines):
     return compile_singbox_json_to_srs(convert_to_singbox_json(rule_lines))
 
 
+def load_rule_lines_with_merged_ip(name):
+    """Read a rule file and append its companion XIP.txt file when present.
+
+    Calling this with DirectIP while Direct.txt exists resolves to Direct, so
+    both single-rule and batch generation produce one merged rule set.
+    """
+    normalized_name = normalize_rule_name(name)
+    if normalized_name.endswith("IP"):
+        base_name = normalized_name[:-2]
+        if base_name:
+            _, base_rule_path = get_rule_path(base_name)
+            if base_rule_path.is_file():
+                normalized_name = base_name
+
+    _, rule_path = get_rule_path(normalized_name)
+    if not rule_path.is_file():
+        raise FileNotFoundError("Rule not found.")
+
+    rule_lines = rule_path.read_text(encoding="utf-8").splitlines()
+    ip_rule_name = f"{normalized_name}IP"
+    _, ip_rule_path = get_rule_path(ip_rule_name)
+    if ip_rule_path.is_file():
+        rule_lines.extend(ip_rule_path.read_text(encoding="utf-8").splitlines())
+
+    return normalized_name, rule_path, rule_lines
+
+
 def generate_rule_by_name(name, ensure_remote_rules=True):
     with GENERATE_LOCK:
-        normalized_name, rule_path = get_rule_path(name)
-        _, json_path, srs_path = get_srs_paths(normalized_name)
-
         with RULES_LOCK:
-            if not rule_path.exists() or not rule_path.is_file():
-                raise FileNotFoundError("Rule not found.")
-            rule_lines = rule_path.read_text(encoding="utf-8").splitlines()
+            normalized_name, rule_path, rule_lines = load_rule_lines_with_merged_ip(name)
+
+        _, json_path, srs_path = get_srs_paths(normalized_name)
 
         remote_update_result = None
         if ensure_remote_rules:
@@ -1431,6 +1455,8 @@ def generate_rule_by_name(name, ensure_remote_rules=True):
 def generate_all_rules():
     results = []
     rules = list_rules()
+    _, ip_skip_rules = get_merged_rule_names(rules)
+    generated_rules = [rule for rule in rules if rule["name"] not in ip_skip_rules]
     required_geo_rules = {
         "geosite": set(),
         "geoip": set(),
@@ -1445,14 +1471,14 @@ def generate_all_rules():
     if not remote_update_result["ok"]:
         return {
             "ok": False,
-            "total": len(rules),
+            "total": len(generated_rules),
             "success_count": 0,
-            "failure_count": len(rules),
+            "failure_count": len(generated_rules),
             "results": [],
             "remote_update": remote_update_result,
         }
 
-    for rule in rules:
+    for rule in generated_rules:
         try:
             result = generate_rule_by_name(rule["name"], ensure_remote_rules=False)
             results.append(result)
@@ -1505,24 +1531,23 @@ def generate_all_openclash_rules():
     _, ip_skip_rules = get_merged_rule_names(rules)
 
     for rule in rules:
+        if rule["name"] in ip_skip_rules:
+            results.append(
+                {
+                    "ok": True,
+                    "rule": {"name": rule["name"], "filename": rule["filename"]},
+                    "payload_count": 0,
+                    "skipped": [],
+                    "merged_into": rule["name"][:-2],
+                }
+            )
+            continue
+
         try:
             with RULES_LOCK:
-                _, rule_path = get_rule_path(rule["name"])
-                rule_lines = rule_path.read_text(encoding="utf-8").splitlines()
+                _, _, rule_lines = load_rule_lines_with_merged_ip(rule["name"])
 
             openclash = convert_to_openclash_yaml(rule_lines, rule_target=rule["name"])
-
-            # Skip IP rules that are merged into their base counterpart
-            if rule["name"] in ip_skip_rules:
-                results.append(
-                    {
-                        "ok": True,
-                        "rule": {"name": rule["name"], "filename": rule["filename"]},
-                        "payload_count": 0,
-                        "skipped": [],
-                    }
-                )
-                continue
 
             for item in openclash["payload"]:
                 if item in seen:
@@ -1931,10 +1956,7 @@ def generate_rules_yaml(rule_mapping, custom_rules, direct_ports=None):
     # Inline rules from each mapped rule file (in template definition order)
     for rule_name, proxy_group in rule_mapping.items():
         try:
-            _, rule_path = get_rule_path(rule_name)
-            if not rule_path.exists():
-                continue
-            rule_lines = rule_path.read_text(encoding="utf-8").splitlines()
+            _, _, rule_lines = load_rule_lines_with_merged_ip(rule_name)
             converted = convert_to_openclash_yaml(rule_lines, rule_target=proxy_group)
             for item in converted["payload"]:
                 lines.append(f"  - {item}")
