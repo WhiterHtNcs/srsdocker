@@ -78,6 +78,14 @@ git pull --ff-only
 docker compose up -d --build
 ```
 
+若要更新容器使用的基础镜像（本项目为 `python:3.12-slim`）并重新创建容器，执行：
+
+```bash
+cd /你的/srsdocker/部署目录
+docker compose build --pull
+docker compose up -d --force-recreate
+```
+
 `mapping/` 是挂载的运行时数据目录，执行上述更新不会覆盖其中的订阅、模板、规则和已生成配置。更新后刷新网页；若修改了生成逻辑或模板，再点击“生成 OpenClash”生成新的配置文件。
 
 ### 本地运行

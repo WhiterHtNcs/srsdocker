@@ -308,6 +308,26 @@
       gap: 12px;
     }
 
+    .provider-order-actions {
+      display: flex;
+      gap: 4px;
+      margin-left: auto;
+    }
+
+    .provider-order-btn {
+      width: 28px;
+      height: 28px;
+      border-radius: 4px;
+      padding: 0;
+      background: #eef2f8;
+      color: #172033;
+      line-height: 1;
+    }
+
+    .provider-order-btn:hover {
+      background: #dce6f5;
+    }
+
     .provider-grid {
       display: grid;
       grid-template-columns: minmax(0, 1fr) minmax(180px, 0.4fr);
@@ -470,6 +490,7 @@
         <button id="saveSubscribeBtn" type="button">保存订阅</button>
         <button id="reloadSubscribeBtn" class="secondary" type="button">重新加载</button>
       </div>
+      <p class="hint">使用每个机场右上角的上移、下移按钮调整顺序，完成后点击“保存订阅”。</p>
 
       <div id="subscriptionList" class="subscription-list" aria-live="polite"></div>
       <div id="subscribeStatus" class="status"></div>
@@ -659,13 +680,39 @@
       const heading = document.createElement("div");
       heading.className = "provider-heading";
       const title = document.createElement("h3");
-      title.textContent = "机场订阅";
+      title.className = "provider-title";
+
+      const orderActions = document.createElement("div");
+      orderActions.className = "provider-order-actions";
+      const moveUp = document.createElement("button");
+      moveUp.type = "button";
+      moveUp.className = "provider-order-btn";
+      moveUp.dataset.action = "move-up";
+      moveUp.textContent = "▲";
+      moveUp.title = "上移机场";
+      moveUp.setAttribute("aria-label", "上移机场");
+      moveUp.addEventListener("click", () => moveProviderCard(card, -1));
+
+      const moveDown = document.createElement("button");
+      moveDown.type = "button";
+      moveDown.className = "provider-order-btn";
+      moveDown.dataset.action = "move-down";
+      moveDown.textContent = "▼";
+      moveDown.title = "下移机场";
+      moveDown.setAttribute("aria-label", "下移机场");
+      moveDown.addEventListener("click", () => moveProviderCard(card, 1));
+      orderActions.append(moveUp, moveDown);
+
       const removeButton = document.createElement("button");
       removeButton.type = "button";
       removeButton.className = "danger";
       removeButton.textContent = "删除";
-      removeButton.addEventListener("click", () => card.remove());
-      heading.append(title, removeButton);
+      removeButton.addEventListener("click", () => {
+        card.remove();
+        updateProviderOrderControls();
+        setSubscribeStatus("机场已删除，请点击“保存订阅”确认。");
+      });
+      heading.append(title, orderActions, removeButton);
 
       const grid = document.createElement("div");
       grid.className = "provider-grid";
@@ -707,6 +754,33 @@
       return card;
     }
 
+    function updateProviderOrderControls() {
+      const cards = [...subscriptionList.querySelectorAll(".provider-card")];
+      cards.forEach((card, index) => {
+        card.querySelector(".provider-title").textContent = `机场订阅 ${index + 1}`;
+        card.querySelector('[data-action="move-up"]').disabled = index === 0;
+        card.querySelector('[data-action="move-down"]').disabled = index === cards.length - 1;
+      });
+    }
+
+    function moveProviderCard(card, direction) {
+      const cards = [...subscriptionList.querySelectorAll(".provider-card")];
+      const index = cards.indexOf(card);
+      const targetIndex = index + direction;
+      if (targetIndex < 0 || targetIndex >= cards.length) {
+        return;
+      }
+
+      const target = cards[targetIndex];
+      if (direction < 0) {
+        subscriptionList.insertBefore(card, target);
+      } else {
+        subscriptionList.insertBefore(target, card);
+      }
+      updateProviderOrderControls();
+      setSubscribeStatus("机场顺序已调整，请点击“保存订阅”确认。");
+    }
+
     function renderSubscriptions() {
       subscriptionList.replaceChildren();
       const providers = Array.isArray(subscribeConfig.providers) ? subscribeConfig.providers : [];
@@ -718,6 +792,7 @@
         return;
       }
       providers.forEach((provider) => subscriptionList.append(createProviderCard(provider)));
+      updateProviderOrderControls();
     }
 
     function collectSubscribeConfig() {
@@ -994,6 +1069,7 @@
         empty.remove();
       }
       subscriptionList.append(createProviderCard({interval: 86400, use_for_ai: true, use_for_latency: false}));
+      updateProviderOrderControls();
       setSubscribeStatus("请填写机场名称和订阅地址后保存。");
     });
 
