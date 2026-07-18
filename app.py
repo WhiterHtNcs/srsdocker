@@ -1759,15 +1759,16 @@ def validate_subscribe_data(payload):
         if not isinstance(use_for_latency, bool):
             raise ValueError(f"Provider {index} use_for_latency must be true or false.")
 
-        normalized_provider = dict(provider)
+        canonical_keys = {"name", "url", "interval", "use_for_ai", "use_for_latency"}
+        normalized_provider = {
+            "name": name,
+            "url": url,
+            "interval": interval,
+            "use_for_ai": use_for_ai,
+            "use_for_latency": use_for_latency,
+        }
         normalized_provider.update(
-            {
-                "name": name,
-                "url": url,
-                "interval": interval,
-                "use_for_ai": use_for_ai,
-                "use_for_latency": use_for_latency,
-            }
+            {key: value for key, value in provider.items() if key not in canonical_keys}
         )
         normalized_providers.append(normalized_provider)
 
