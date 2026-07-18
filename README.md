@@ -60,6 +60,26 @@ docker compose up -d
 #    http://localhost:9044
 ```
 
+### 更新已有 Docker 容器
+
+在部署目录执行。普通的后端、前端或生成器更新无需重新构建镜像：
+
+```bash
+cd /你的/srsdocker/部署目录
+git pull --ff-only
+docker compose restart
+```
+
+若本次更新包含 `Dockerfile`、`docker-compose.yml` 或容器依赖变更，则改用重新构建：
+
+```bash
+cd /你的/srsdocker/部署目录
+git pull --ff-only
+docker compose up -d --build
+```
+
+`mapping/` 是挂载的运行时数据目录，执行上述更新不会覆盖其中的订阅、模板、规则和已生成配置。更新后刷新网页；若修改了生成逻辑或模板，再点击“生成 OpenClash”生成新的配置文件。
+
 ### 本地运行
 
 ```bash
