@@ -35,7 +35,7 @@ srsdocker/
 │
 └── mapping/                    ⭐ 整个目录 gitignored（运行时数据/配置根）
     ├── config/
-    │   ├── config.json         # 远程规则源 + 定时任务开关（见 §4.4）
+    │   ├── config.json         # 远程规则源、定时任务、全局测速参数（见 §4.4）
     │   ├── subscribe.json      ⭐ 机场订阅配置（含真实 URL/Token，勿泄露/勿提交）§4.1
     │   ├── template.yaml       ⭐ OpenClash 配置模板 §4.2
     │   ├── ports.json          ⭐ BT/PT 直连端口 §4.3
@@ -87,17 +87,24 @@ srsdocker/
 - 数字（单端口）不用引号，含 `-` 的范围（字符串）要引号
 - 生成时转为 `DST-PORT,<port>,DIRECT` 规则，插在 custom_rules 之后
 
-### 4.4 `mapping/config/config.json` — 远程规则源与定时任务
+### 4.4 `mapping/config/config.json` — 远程规则源、定时任务与测速参数
 ```json
 {
   "geosite_url": "https://api.github.com/repos/MetaCubeX/meta-rules-dat/contents/geo/geosite?ref=sing",
   "geoip_url":  "https://api.github.com/repos/MetaCubeX/meta-rules-dat/contents/geo/geoip?ref=sing",
   "github_token": "",              // 可选，GitHub API 限流时填
   "auto_update_enabled": false,    // cron 开关
-  "auto_update_cron": "0 4 * * *"
+  "auto_update_cron": "0 4 * * *",
+  "url_test": {
+    "url": "https://www.gstatic.com/generate_204",
+    "interval": 300,
+    "tolerance": 50,
+    "timeout": 5000,
+    "lazy": true
+  }
 }
 ```
-`entrypoint.sh` 启动时读此文件，生成 `/etc/cron.d/singbox-srs-generator`，定时跑 `python app.py --update-remote-rules`。
+`url_test` 是所有自动测速策略组共用的参数；可通过 Web UI 的“测速设置”标签页修改。`entrypoint.sh` 启动时读此文件，生成 `/etc/cron.d/singbox-srs-generator`，定时跑 `python app.py --update-remote-rules`。
 
 ## 5. 占位符系统（template.yaml 内，最近刚改名）
 
@@ -109,6 +116,7 @@ srsdocker/
 | `__PROVIDER_COUNTRY_NODES__` | 每个启用 AI 的“机场·国家”组名称列表 | AI 的 `proxies:` 下 |
 | `__ALLNODES__` | 机场名列表（`- 机场A / - 机场B ...`） | proxy-groups 的 `proxies:` 或 `use:` 下 |
 | `__RULE_GROUPS__` | rule_mapping 中"键=值"条目对应的 select 组定义 | proxy-groups 列表内 |
+| `__URL_TEST_OPTIONS__` | 全局 url-test 参数（url、interval、tolerance、timeout、lazy） | 每个模板内 url-test 组的 `type` 下 |
 
 **⚠️ `__ALLNODES__` 放在不同字段下语义不同（这是最易踩的坑）：**
 

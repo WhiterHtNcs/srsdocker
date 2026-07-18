@@ -356,6 +356,7 @@
     <nav class="tabs" aria-label="主导航">
       <button class="tab-button active" type="button" data-tab="rules" role="tab" aria-selected="true">规则管理</button>
       <button class="tab-button" type="button" data-tab="config" role="tab" aria-selected="false">配置</button>
+      <button class="tab-button" type="button" data-tab="urltest" role="tab" aria-selected="false">测速设置</button>
       <button class="tab-button" type="button" data-tab="subscribe" role="tab" aria-selected="false">订阅管理</button>
     </nav>
   </header>
@@ -426,6 +427,36 @@
       <pre id="remoteOutput">尚未同步</pre>
     </section>
 
+    <section class="tab-panel" data-tab-panel="urltest" hidden>
+      <h2>测速设置</h2>
+      <p class="hint">此处参数会统一用于全部延迟测速组：全部节点、国家、启用“使用延迟最低”的机场，以及 AI 启用机场的机场×国家组。</p>
+
+      <label for="urlTestUrl">测速 URL</label>
+      <input id="urlTestUrl" type="url" placeholder="https://www.gstatic.com/generate_204">
+
+      <label for="urlTestInterval">测速间隔（秒）</label>
+      <input id="urlTestInterval" type="number" min="10" max="86400" step="1">
+
+      <label for="urlTestTolerance">切换容差（毫秒）</label>
+      <input id="urlTestTolerance" type="number" min="0" max="10000" step="1">
+      <p class="hint">仅当新节点比当前节点快至少该数值时才切换，可减少频繁跳节点。</p>
+
+      <label for="urlTestTimeout">单次测速超时（毫秒）</label>
+      <input id="urlTestTimeout" type="number" min="1000" max="60000" step="1">
+
+      <label class="check-row" for="urlTestLazy">
+        <input id="urlTestLazy" type="checkbox">
+        按需测速（lazy）
+      </label>
+      <p class="hint">关闭后会按间隔持续测速；开启时通常在策略组被使用后才开始测速。</p>
+
+      <div class="actions">
+        <button id="saveUrlTestBtn" type="button">保存测速设置</button>
+        <button id="reloadUrlTestBtn" class="secondary" type="button">重新加载</button>
+      </div>
+      <div id="urlTestStatus" class="status"></div>
+    </section>
+
     <section class="tab-panel" data-tab-panel="subscribe" hidden>
       <h2>订阅管理</h2>
       <p class="hint">订阅地址属于敏感信息，仅在此设备的浏览器与本服务之间读取和保存。请勿将 Web UI 暴露到不可信网络。</p>
@@ -453,6 +484,14 @@
     const autoUpdateEnabled = document.querySelector("#autoUpdateEnabled");
     const autoUpdateCron = document.querySelector("#autoUpdateCron");
     const remoteOutput = document.querySelector("#remoteOutput");
+    const urlTestUrl = document.querySelector("#urlTestUrl");
+    const urlTestInterval = document.querySelector("#urlTestInterval");
+    const urlTestTolerance = document.querySelector("#urlTestTolerance");
+    const urlTestTimeout = document.querySelector("#urlTestTimeout");
+    const urlTestLazy = document.querySelector("#urlTestLazy");
+    const urlTestStatus = document.querySelector("#urlTestStatus");
+    const saveUrlTestBtn = document.querySelector("#saveUrlTestBtn");
+    const reloadUrlTestBtn = document.querySelector("#reloadUrlTestBtn");
     const subscribeUserAgent = document.querySelector("#subscribeUserAgent");
     const subscriptionList = document.querySelector("#subscriptionList");
     const subscribeStatus = document.querySelector("#subscribeStatus");
@@ -481,6 +520,10 @@
 
     function setSubscribeStatus(message) {
       subscribeStatus.textContent = message;
+    }
+
+    function setUrlTestStatus(message) {
+      urlTestStatus.textContent = message;
     }
 
     function switchTab(tabName) {
@@ -545,6 +588,12 @@
       }
       autoUpdateEnabled.checked = Boolean(config.auto_update_enabled);
       autoUpdateCron.value = config.auto_update_cron || "0 4 * * *";
+      const urlTest = config.url_test || {};
+      urlTestUrl.value = urlTest.url || "https://www.gstatic.com/generate_204";
+      urlTestInterval.value = urlTest.interval ?? 300;
+      urlTestTolerance.value = urlTest.tolerance ?? 50;
+      urlTestTimeout.value = urlTest.timeout ?? 5000;
+      urlTestLazy.checked = urlTest.lazy ?? true;
     }
 
     async function saveConfig() {
@@ -561,6 +610,21 @@
 
       const result = await postJson("/api/config", payload);
       setStatus(`配置已保存到 ${result.config_path || "config.json"}。`);
+      await loadConfig();
+    }
+
+    async function saveUrlTestConfig() {
+      const payload = {
+        url_test: {
+          url: urlTestUrl.value.trim(),
+          interval: Number(urlTestInterval.value),
+          tolerance: Number(urlTestTolerance.value),
+          timeout: Number(urlTestTimeout.value),
+          lazy: urlTestLazy.checked
+        }
+      };
+      const result = await postJson("/api/config", payload);
+      setUrlTestStatus(`测速设置已保存。请重新生成 OpenClash 配置后生效（${result.config_path || "config.json"}）。`);
       await loadConfig();
     }
 
@@ -910,6 +974,14 @@
 
     document.querySelector("#remoteUpdateBtn").addEventListener("click", () => {
       updateRemoteRules().catch((error) => setStatus(error.message));
+    });
+
+    saveUrlTestBtn.addEventListener("click", () => {
+      saveUrlTestConfig().catch((error) => setUrlTestStatus(error.message));
+    });
+
+    reloadUrlTestBtn.addEventListener("click", () => {
+      loadConfig().then(() => setUrlTestStatus("测速设置已重新加载。")).catch((error) => setUrlTestStatus(error.message));
     });
 
     document.querySelectorAll("[data-tab]").forEach((button) => {

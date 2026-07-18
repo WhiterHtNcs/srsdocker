@@ -104,6 +104,29 @@ python app.py
 | `providers[].use_for_latency` | 是否让该机场组自动选择延迟最低节点，默认 `false` |
 | `providers[].override.additional-prefix` | 节点名前缀 |
 
+### `mapping/config/config.json`
+
+除远程规则源与定时任务外，此文件还保存全部测速组共用的参数：
+
+```json
+{
+  "url_test": {
+    "url": "https://www.gstatic.com/generate_204",
+    "interval": 300,
+    "tolerance": 50,
+    "timeout": 5000,
+    "lazy": true
+  }
+}
+```
+
+- `interval`：测速间隔，单位秒。
+- `tolerance`：切换容差，单位毫秒。
+- `timeout`：单次测速超时，单位毫秒。
+- `lazy`：是否按需测速。
+
+可在 Web UI 的“测速设置”标签页修改；保存后需重新生成 OpenClash 配置才会写入 YAML。
+
 ### `mapping/config/template.yaml`
 
 OpenClash 配置模板，**私人配置，不提交 Git**。包含：
@@ -122,6 +145,7 @@ OpenClash 配置模板，**私人配置，不提交 Git**。包含：
 | `__PROVIDER_COUNTRY_NODES__` | 所有启用 AI 的“机场·国家”组名称列表，可嵌入 AI 的 `proxies:` |
 | `__RULE_GROUPS__` | 各规则类别对应的 select 策略组（rule_mapping 中值=键的条目） |
 | `__PROXY_PROVIDERS__` | proxy-providers 插入位置 |
+| `__URL_TEST_OPTIONS__` | 统一的 url-test 参数（url、interval、tolerance、timeout、lazy） |
 
 #### rule_mapping 说明
 

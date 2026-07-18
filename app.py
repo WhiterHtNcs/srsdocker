@@ -49,12 +49,22 @@ GENERATE_LOCK = threading.Lock()
 REMOTE_UPDATE_LOCK = threading.Lock()
 
 
+DEFAULT_URL_TEST_CONFIG = {
+    "url": "https://www.gstatic.com/generate_204",
+    "interval": 300,
+    "tolerance": 50,
+    "timeout": 5000,
+    "lazy": True,
+}
+
+
 DEFAULT_CONFIG = {
     "geosite_url": "https://api.github.com/repos/MetaCubeX/meta-rules-dat/contents/geo/geosite?ref=sing",
     "geoip_url": "https://api.github.com/repos/MetaCubeX/meta-rules-dat/contents/geo/geoip?ref=sing",
     "github_token": "",
     "auto_update_enabled": False,
     "auto_update_cron": "0 4 * * *",
+    "url_test": DEFAULT_URL_TEST_CONFIG,
 }
 
 RULE_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
@@ -103,7 +113,10 @@ def load_stored_config():
             data = json.load(file)
 
         config = dict(DEFAULT_CONFIG)
-        config.update(data)
+        config["url_test"] = dict(DEFAULT_URL_TEST_CONFIG)
+        config.update({key: value for key, value in data.items() if key != "url_test"})
+        if isinstance(data.get("url_test"), dict):
+            config["url_test"].update(data["url_test"])
         config.pop("web_port", None)
         return config
 
@@ -501,6 +514,51 @@ def validate_download_url(url):
         raise ValueError("Download URL must include a host.")
 
     return url.strip()
+
+
+def validate_url_test_config(value):
+    """Validate and normalize shared url-test settings."""
+    if not isinstance(value, dict):
+        raise ValueError("URL-test configuration must be an object.")
+
+    config = dict(DEFAULT_URL_TEST_CONFIG)
+    config.update(value)
+
+    url = validate_download_url(config["url"])
+    normalized = {"url": url}
+    for key, minimum, maximum in (
+        ("interval", 10, 86400),
+        ("tolerance", 0, 10000),
+        ("timeout", 1000, 60000),
+    ):
+        raw_value = config[key]
+        if isinstance(raw_value, bool) or not isinstance(raw_value, int):
+            raise ValueError(f"URL-test {key} must be an integer.")
+        if not minimum <= raw_value <= maximum:
+            raise ValueError(f"URL-test {key} must be between {minimum} and {maximum}.")
+        normalized[key] = raw_value
+
+    if not isinstance(config["lazy"], bool):
+        raise ValueError("URL-test lazy must be true or false.")
+    normalized["lazy"] = config["lazy"]
+    return normalized
+
+
+def get_url_test_option_lines(url_test_config):
+    """Return url-test settings as YAML key/value lines without indentation."""
+    return [
+        f"url: {json.dumps(url_test_config['url'], ensure_ascii=False)}",
+        f"interval: {url_test_config['interval']}",
+        f"tolerance: {url_test_config['tolerance']}",
+        f"timeout: {url_test_config['timeout']}",
+        f"lazy: {str(url_test_config['lazy']).lower()}",
+    ]
+
+
+def generate_url_test_options_yaml(url_test_config, continuation_indent="    "):
+    """Generate options for a template marker whose first line inherits its indent."""
+    lines = get_url_test_option_lines(url_test_config)
+    return "\n".join([lines[0], *[f"{continuation_indent}{line}" for line in lines[1:]]])
 
 
 def validate_cron_expression(expression):
@@ -1820,7 +1878,7 @@ def get_ai_providers(providers):
     return [provider for provider in providers if provider.get("use_for_ai", True)]
 
 
-def generate_provider_country_groups_yaml(providers):
+def generate_provider_country_groups_yaml(providers, url_test_config):
     """Generate latency-test groups that filter one provider to one country/region."""
     groups = get_provider_country_groups(providers)
     lines = []
@@ -1832,7 +1890,7 @@ def generate_provider_country_groups_yaml(providers):
             [
                 f"{prefix}: {group_name}",
                 "    type: url-test",
-                "    lazy: true",
+                *[f"    {line}" for line in get_url_test_option_lines(url_test_config)],
                 "    use:",
                 f"      - {provider_name}",
                 f"    filter: '{node_filter}'",
@@ -2001,8 +2059,12 @@ def generate_full_openclash_config():
     if not rule_mapping:
         return {"ok": False, "error": "rule_mapping is empty in template."}
 
-    # Step 2: Load subscriptions
+    # Step 2: Load subscriptions and shared url-test settings
     providers, global_ua = load_subscribe_config()
+    try:
+        url_test_config = validate_url_test_config(load_stored_config().get("url_test", {}))
+    except ValueError as error:
+        return {"ok": False, "error": f"Invalid URL-test configuration: {error}"}
 
     # Step 2.5: Replace provider-related placeholders
     provider_names = [p.get("name", "Unknown") for p in providers]
@@ -2026,7 +2088,7 @@ def generate_full_openclash_config():
                 group_lines.append(f"  - name: {name}")
             group_lines.append("    type: url-test" if provider.get("use_for_latency", False) else "    type: select")
             if provider.get("use_for_latency", False):
-                group_lines.append("    lazy: true")
+                group_lines.extend(f"    {line}" for line in get_url_test_option_lines(url_test_config))
             group_lines.append(f"    use:")
             group_lines.append(f"      - {name}")
         provider_groups_block = "\n".join(group_lines)
@@ -2034,7 +2096,12 @@ def generate_full_openclash_config():
 
     if "__PROVIDER_COUNTRY_GROUPS__" in preamble:
         preamble = preamble.replace(
-            "__PROVIDER_COUNTRY_GROUPS__", generate_provider_country_groups_yaml(ai_providers)
+            "__PROVIDER_COUNTRY_GROUPS__", generate_provider_country_groups_yaml(ai_providers, url_test_config)
+        )
+
+    if "__URL_TEST_OPTIONS__" in preamble:
+        preamble = preamble.replace(
+            "__URL_TEST_OPTIONS__", generate_url_test_options_yaml(url_test_config)
         )
 
     if "__PROVIDER_COUNTRY_NODES__" in preamble:
@@ -2176,6 +2243,16 @@ class AppHandler(SimpleHTTPRequestHandler):
 
                 if "auto_update_cron" in payload:
                     config["auto_update_cron"] = validate_cron_expression(payload["auto_update_cron"])
+
+                if "url_test" in payload:
+                    current_url_test = config.get("url_test")
+                    merged_url_test = dict(DEFAULT_URL_TEST_CONFIG)
+                    if isinstance(current_url_test, dict):
+                        merged_url_test.update(current_url_test)
+                    if not isinstance(payload["url_test"], dict):
+                        raise ValueError("URL-test configuration must be an object.")
+                    merged_url_test.update(payload["url_test"])
+                    config["url_test"] = validate_url_test_config(merged_url_test)
             except ValueError as error:
                 self.send_json({"error": str(error)}, status=HTTPStatus.BAD_REQUEST)
                 return
