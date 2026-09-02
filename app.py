@@ -82,6 +82,7 @@ COUNTRY_NODE_FILTERS = (
     ("新加坡", r"(?i)(新加坡|狮城|獅城|\bSG\b|\bSGP\b|Singapore)"),
     ("台湾", r"(?i)(台湾|台灣|\bTW\b|\bTWN\b|Taiwan|台北|臺北|新北|高雄|台中|臺中)"),
     ("日本", r"(?i)(日本|\bJP\b|\bJPN\b|Japan|东京|東京|大阪|札幌|川崎)"),
+    ("英国", r"(?i)(英国|英國|\bUK\b|\bGB\b|\bGBR\b|United Kingdom|London|伦敦|倫敦|曼彻斯特|曼徹斯特)"),
 )
 
 
