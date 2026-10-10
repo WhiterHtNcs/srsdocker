@@ -171,7 +171,7 @@ OpenClash 配置模板，**私人配置，不提交 Git**。包含：
 |--------|--------|
 | `__ALLNODES__` | 全部节点（机场名列表，放 `proxies:` 引用机场组，放 `use:` 平铺所有节点） |
 | `__PROVIDER_GROUPS__` | 各机场策略组定义；`use_for_latency: true` 时为 url-test，否则为 select |
-| `__PROVIDER_COUNTRY_GROUPS__` | 所有启用 AI 的“机场·国家”延迟测速组定义 |
+| `__PROVIDER_COUNTRY_GROUPS__` | 所有启用 AI 的“机场·国家”延迟测速组定义，仅美国、新加坡、台湾、日本 |
 | `__PROVIDER_COUNTRY_NODES__` | 所有启用 AI 的“机场·国家”组名称列表，可嵌入 AI 的 `proxies:` |
 | `__PROVIDER_RESIDENTIAL_GROUPS__` | 每个勾选家宽的机场一个独立“机场·家宽”手动选择组定义；无人勾选时为空 |
 | `__RESIDENTIAL_NODE__` | 所有勾选家宽的“机场·家宽”组名称列表，可嵌入 AI 或其他策略组的 `proxies:`；无人勾选时为空 |
