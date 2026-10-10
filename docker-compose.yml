@@ -1,8 +1,10 @@
 services:
   srsdocker:
     image: srsdocker:latest
+    pull_policy: build
     build:
       context: .
+      pull: false
     container_name: srsdocker
     network_mode: bridge
     env_file:
