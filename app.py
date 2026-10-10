@@ -1934,17 +1934,16 @@ def generate_provider_country_references_yaml(providers):
 
 
 def generate_provider_residential_groups_yaml(providers):
-    """Generate a separate residential selector and its per-provider manual groups."""
+    """Generate one standalone residential manual group per opted-in provider."""
     groups = get_provider_residential_groups(providers)
-    if not groups:
-        return ""
-    lines = ["- name: 家宽", "    type: select", "    proxies:"]
-    lines.extend(f"      - {group_name}" for group_name, _, _ in groups)
-    for group_name, provider_name, node_filter in groups:
+    lines = []
+    for index, (group_name, provider_name, node_filter) in enumerate(groups):
+        if index:
+            lines.append("")
+        prefix = "- name" if index == 0 else "  - name"
         lines.extend(
             [
-                "",
-                f"  - name: {group_name}",
+                f"{prefix}: {group_name}",
                 "    type: select",
                 "    use:",
                 f"      - {provider_name}",
@@ -1955,8 +1954,11 @@ def generate_provider_residential_groups_yaml(providers):
 
 
 def generate_residential_reference_yaml(providers):
-    """Expose the residential entry only when at least one provider opted in."""
-    return "- 家宽" if get_provider_residential_groups(providers) else ""
+    """Reference opted-in providers' residential groups directly."""
+    names = [group_name for group_name, _, _ in get_provider_residential_groups(providers)]
+    if not names:
+        return ""
+    return "\n".join([f"- {names[0]}", *[f"      - {name}" for name in names[1:]]])
 
 
 def read_template():
