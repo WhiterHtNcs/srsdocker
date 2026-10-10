@@ -338,6 +338,22 @@
       grid-column: 1 / -1;
     }
 
+    .provider-options {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px 24px;
+      margin: 14px 0 6px;
+    }
+
+    .provider-options .check-row {
+      margin: 0;
+      max-width: 100%;
+    }
+
+    .provider-options input[type="checkbox"] {
+      flex-shrink: 0;
+    }
+
     pre {
       background: #101828;
       color: #ecf2ff;
@@ -734,7 +750,7 @@
       url.input.dataset.field = "url";
 
       const aiField = document.createElement("label");
-      aiField.className = "check-row wide";
+      aiField.className = "check-row";
       const useForAi = document.createElement("input");
       useForAi.type = "checkbox";
       useForAi.checked = provider.use_for_ai !== false;
@@ -742,7 +758,7 @@
       aiField.append(useForAi, document.createTextNode("用于 AI 策略组"));
 
       const residentialField = document.createElement("label");
-      residentialField.className = "check-row wide";
+      residentialField.className = "check-row";
       const useForResidential = document.createElement("input");
       useForResidential.type = "checkbox";
       useForResidential.checked = provider.use_for_residential === true;
@@ -750,7 +766,7 @@
       residentialField.append(useForResidential, document.createTextNode("创建家宽策略组"));
 
       const dnsField = document.createElement("label");
-      dnsField.className = "check-row wide";
+      dnsField.className = "check-row";
       const useForDns = document.createElement("input");
       useForDns.type = "checkbox";
       useForDns.checked = provider.use_for_dns === true;
@@ -759,14 +775,17 @@
       dnsField.append(useForDns, document.createTextNode("DNS 下发"));
 
       const latencyField = document.createElement("label");
-      latencyField.className = "check-row wide";
+      latencyField.className = "check-row";
       const useForLatency = document.createElement("input");
       useForLatency.type = "checkbox";
       useForLatency.checked = provider.use_for_latency === true;
       useForLatency.dataset.field = "use_for_latency";
       latencyField.append(useForLatency, document.createTextNode("机场组自动选择延迟最低节点"));
 
-      grid.append(name.field, interval.field, url.field, aiField, residentialField, dnsField, latencyField);
+      const options = document.createElement("div");
+      options.className = "provider-options wide";
+      options.append(aiField, residentialField, dnsField, latencyField);
+      grid.append(name.field, interval.field, url.field, options);
       card.append(heading, grid);
       return card;
     }
