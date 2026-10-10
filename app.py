@@ -35,11 +35,15 @@ OPENCLASH_ALL_FILENAME = "openclash.yaml"
 TEMPLATE_PATH = MAPPING_DIR / "config" / "template.yaml"
 SUBSCRIBE_PATH = MAPPING_DIR / "config" / "subscribe.json"
 PORTS_PATH = MAPPING_DIR / "config" / "ports.json"
+RESIDENTIAL_FILTER_PATH = MAPPING_DIR / "config" / "residential_filter.json"
+COUNTRY_FILTER_PATH = MAPPING_DIR / "config" / "country_filter.json"
 RULES_DAT_DIR = MAPPING_DIR / "rules-dat"
 SING_BOX_PATH = Path(os.environ.get("SING_BOX_PATH", str(MAPPING_DIR / "bin" / ("sing-box.exe" if os.name == "nt" else "sing-box"))))
 CRON_FILE = Path(os.environ.get("CRON_FILE", "/etc/cron.d/singbox-srs-generator"))
 APP_PORT = 9044
 MAX_JSON_BODY_BYTES = 1024 * 1024
+MAX_SUBSCRIPTION_BYTES = 10 * 1024 * 1024
+DEFAULT_RESIDENTIAL_FILTER = {"keywords": ["家宽"]}
 
 CONFIG_LOCK = threading.RLock()
 RULES_LOCK = threading.RLock()
@@ -74,7 +78,7 @@ DOMAIN_LIKE_PATTERN = re.compile(r"^(?=.{1,253}$)(?!-)[A-Za-z0-9_.*-]+(?:\.[A-Za
 KEYWORD_LIKE_PATTERN = re.compile(r"^[A-Za-z0-9_.!@+*-]+$")
 PROVIDER_NAME_PATTERN = re.compile(r"^[^\r\n:#{}\[\],&*!|>'\"%@`]{1,128}$")
 
-COUNTRY_NODE_FILTERS = (
+DEFAULT_COUNTRY_NODE_FILTERS = (
     (
         "美国",
         r"(?i)(美国|美國|\bUS\b|\bUSA\b|United States|洛杉矶|洛杉磯|圣何塞|聖何塞|西雅图|西雅圖|纽约|紐約|芝加哥|达拉斯|達拉斯)",
@@ -84,15 +88,12 @@ COUNTRY_NODE_FILTERS = (
     ("日本", r"(?i)(日本|\bJP\b|\bJPN\b|Japan|东京|東京|大阪|札幌|川崎)"),
 )
 
-RESIDENTIAL_COUNTRIES = ("美国", "新加坡", "台湾", "日本")
-RESIDENTIAL_COUNTRY_FILTER = "(?:" + "|".join(
-    node_filter.removeprefix("(?i)")
-    for country, node_filter in COUNTRY_NODE_FILTERS
-    if country in RESIDENTIAL_COUNTRIES
-) + ")"
-RESIDENTIAL_NODE_FILTER = (
-    rf"(?i)(?:{RESIDENTIAL_COUNTRY_FILTER}.*家宽|家宽.*{RESIDENTIAL_COUNTRY_FILTER})"
-)
+DEFAULT_COUNTRY_FILTER = {
+    "countries": [
+        {"name": country, "enabled": True, "filter": node_filter}
+        for country, node_filter in DEFAULT_COUNTRY_NODE_FILTERS
+    ]
+}
 
 
 class RuleConversionError(Exception):
@@ -104,6 +105,7 @@ class RuleConversionError(Exception):
 def ensure_directories():
     MAPPING_DIR.mkdir(parents=True, exist_ok=True)
     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    (SUBSCRIBE_PATH.parent / "providers").mkdir(parents=True, exist_ok=True)
     RULES_DIR.mkdir(exist_ok=True)
     RULE_SET_DIR.mkdir(exist_ok=True)
     SRS_DIR.mkdir(exist_ok=True)
@@ -111,6 +113,8 @@ def ensure_directories():
     (RULES_DAT_DIR / "geosite").mkdir(parents=True, exist_ok=True)
     (RULES_DAT_DIR / "geoip").mkdir(parents=True, exist_ok=True)
     WEB_DIR.mkdir(exist_ok=True)
+    ensure_residential_filter_file()
+    ensure_country_filter_file()
 
 
 def load_stored_config():
@@ -1817,16 +1821,15 @@ def download_provider_subscription(provider, global_user_agent=None):
         validate_download_url(provider.get("url", "")),
         headers={"User-Agent": str(user_agent), "Accept": "application/yaml, text/yaml, */*"},
     )
-    max_bytes = 10 * 1024 * 1024
     try:
         with urllib.request.urlopen(request, timeout=20) as response:
-            content = response.read(max_bytes + 1)
+            content = response.read(MAX_SUBSCRIPTION_BYTES + 1)
     except urllib.error.HTTPError as error:
         raise ValueError(f"下载订阅失败（HTTP {error.code}）。") from error
     except (OSError, urllib.error.URLError, TimeoutError) as error:
         # Do not expose subscription URLs/tokens in API errors.
         raise ValueError("下载订阅失败，请检查订阅地址及网络连接。") from error
-    if len(content) > max_bytes:
+    if len(content) > MAX_SUBSCRIPTION_BYTES:
         raise ValueError("订阅配置超过 10 MiB，无法提取 DNS。")
     try:
         return content.decode("utf-8-sig")
@@ -1886,6 +1889,59 @@ def extract_subscription_dns_policy(content):
     return policy
 
 
+def get_provider_config_path(provider):
+    """Keep airport YAML files inside config/providers with their original names."""
+    name = provider.get("name", "")
+    if not isinstance(name, str) or not name.strip() or re.search(r'[\\/:*?"<>|\x00-\x1f]', name):
+        raise ValueError("机场名称不能用于配置文件名，请移除斜杠等文件名特殊字符。")
+    config_dir = SUBSCRIBE_PATH.parent.resolve()
+    providers_dir = (config_dir / "providers").resolve()
+    path = providers_dir / f"{name}.yaml"
+    if (providers_dir.parent != config_dir or path.resolve().parent != providers_dir
+            or path.name.casefold() == TEMPLATE_PATH.name.casefold()):
+        raise ValueError("机场配置文件名与模板冲突或超出 config/providers 目录。")
+    return path
+
+
+def migrate_provider_config_file(provider):
+    """Move an old airport cache only when the new location has no file."""
+    path = get_provider_config_path(provider)
+    if path.exists():
+        return path
+    config_dir = SUBSCRIBE_PATH.parent.resolve()
+    old_path = config_dir / path.name
+    if old_path.is_file() and old_path.resolve().parent == config_dir:
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            old_path.rename(path)
+        except OSError as error:
+            raise ValueError(f"无法将旧配置 {path.name} 迁移到 config/providers 目录。") from error
+    return path
+
+
+def load_provider_dns_policy(provider, global_user_agent=None):
+    """Refresh a usable YAML cache, or read it when the online config is unavailable."""
+    path = migrate_provider_config_file(provider)
+    try:
+        content = download_provider_subscription(provider, global_user_agent)
+        policy = extract_subscription_dns_policy(content)
+    except (ValueError, OSError) as online_error:
+        if not path.is_file():
+            raise ValueError(f"在线配置不可用（{online_error}），且本地文件 {path.name} 不存在。") from online_error
+        try:
+            if path.stat().st_size > MAX_SUBSCRIPTION_BYTES:
+                raise ValueError("本地配置超过 10 MiB。")
+            policy = extract_subscription_dns_policy(path.read_text(encoding="utf-8-sig"))
+        except (ValueError, OSError) as local_error:
+            raise ValueError(f"在线配置不可用（{online_error}），本地文件 {path.name} 也无法使用（{local_error}）。") from local_error
+        return policy, {"source": "local", "file": path.name, "fallback_reason": str(online_error)}
+    try:
+        write_text_file_atomic(path, content)
+    except OSError as error:
+        raise ValueError(f"已获取在线配置，但无法保存本地文件 {path.name}。") from error
+    return policy, {"source": "download", "file": path.name}
+
+
 def apply_provider_dns_policy(full_yaml, providers, global_user_agent=None):
     """Merge exact node-domain policies; keep unselected output byte-identical."""
     selected = [provider for provider in providers if provider.get("use_for_dns", False) is True]
@@ -1896,14 +1952,14 @@ def apply_provider_dns_policy(full_yaml, providers, global_user_agent=None):
     for provider in selected:
         name = provider.get("name", "Unknown")
         try:
-            policy = extract_subscription_dns_policy(download_provider_subscription(provider, global_user_agent))
+            policy, source_info = load_provider_dns_policy(provider, global_user_agent)
         except ValueError as error:
             raise ValueError(f"机场「{name}」DNS 下发失败：{error}") from error
         for domain, resolvers in policy.items():
             if domain in incoming and set(incoming[domain]) != set(resolvers):
                 raise ValueError(f"机场「{name}」DNS 策略冲突：多个机场对同一节点域名指定了不同 DNS。")
             incoming[domain] = resolvers
-        adapted.append({"name": name, "domain_count": len(policy)})
+        adapted.append({"name": name, "domain_count": len(policy), **source_info})
     info = {"dns_policy_count": len(incoming), "dns_providers": adapted}
     if not incoming:
         return full_yaml, info
@@ -2035,12 +2091,73 @@ def generate_proxy_providers_yaml(providers, global_user_agent=None):
     return "\n".join(lines) + "\n"
 
 
-def get_provider_country_groups(providers):
+def ensure_country_filter_file():
+    """Provision shared AI/residential country defaults without replacing edits."""
+    if not COUNTRY_FILTER_PATH.exists():
+        write_text_file_atomic(
+            COUNTRY_FILTER_PATH,
+            json.dumps(DEFAULT_COUNTRY_FILTER, ensure_ascii=False, indent=2) + "\n",
+        )
+
+
+def get_country_node_filters():
+    """Reload enabled country names and filters in the configured order."""
+    ensure_country_filter_file()
+    try:
+        config = json.loads(COUNTRY_FILTER_PATH.read_text(encoding="utf-8-sig"))
+    except (ValueError, OSError) as error:
+        raise ValueError("无法读取 country_filter.json，请检查文件和 JSON 格式。") from error
+    countries = config.get("countries") if isinstance(config, dict) else None
+    if not isinstance(countries, list):
+        raise ValueError("country_filter.json 中 countries 必须是数组。")
+    names = set()
+    filters = []
+    for index, country in enumerate(countries, 1):
+        prefix = f"country_filter.json 中第 {index} 个国家"
+        if not isinstance(country, dict):
+            raise ValueError(f"{prefix}必须是对象。")
+        name = country.get("name")
+        if not isinstance(name, str) or not PROVIDER_NAME_PATTERN.fullmatch(name.strip()):
+            raise ValueError(f"{prefix}的 name 不能为空或包含 YAML 特殊字符。")
+        name = name.strip()
+        if name in names:
+            raise ValueError(f"{prefix}的 name 重复：{name}。")
+        names.add(name)
+        enabled = country.get("enabled", True)
+        if not isinstance(enabled, bool):
+            raise ValueError(f"{prefix}的 enabled 必须是 true 或 false。")
+        node_filter = country.get("filter")
+        if (not isinstance(node_filter, str) or not node_filter.strip()
+                or "\n" in node_filter or "\r" in node_filter):
+            raise ValueError(f"{prefix}的 filter 必须是非空单行正则表达式。")
+        try:
+            re.compile(node_filter)
+            re.compile(scope_country_filter(node_filter))
+        except re.error as error:
+            raise ValueError(f"{prefix}的 filter 正则表达式无效。") from error
+        if enabled:
+            filters.append((name, node_filter))
+    return filters
+
+
+def scope_country_filter(node_filter):
+    """Keep leading regex flags scoped when joining country alternatives."""
+    flags = re.match(r"^\(\?([aiLmsux]+)\)", node_filter)
+    if flags:
+        return f"(?{flags[1]}:{scope_country_filter(node_filter[flags.end():])})"
+    return f"(?:{node_filter})"
+
+
+def get_provider_country_groups(providers, country_filters=None):
     """Return (group_name, provider_name, filter) tuples for every airport/country pair."""
+    if not providers:
+        return []
+    if country_filters is None:
+        country_filters = get_country_node_filters()
     return [
         (f"{provider.get('name', 'Unknown')}·{country}", provider.get("name", "Unknown"), node_filter)
         for provider in providers
-        for country, node_filter in COUNTRY_NODE_FILTERS
+        for country, node_filter in country_filters
     ]
 
 
@@ -2049,23 +2166,64 @@ def get_ai_providers(providers):
     return [provider for provider in providers if provider.get("use_for_ai", True)]
 
 
-def get_provider_residential_groups(providers):
-    """Return one residential group per opted-in provider, combining four regions."""
-    return [
-        (f"{provider.get('name', 'Unknown')}·家宽", provider.get("name", "Unknown"), RESIDENTIAL_NODE_FILTER)
-        for provider in providers
-        if provider.get("use_for_residential", False)
-    ]
+def ensure_residential_filter_file():
+    """Provision editable defaults on fresh installations without replacing edits."""
+    if not RESIDENTIAL_FILTER_PATH.exists():
+        write_text_file_atomic(
+            RESIDENTIAL_FILTER_PATH,
+            json.dumps(DEFAULT_RESIDENTIAL_FILTER, ensure_ascii=False, indent=2) + "\n",
+        )
 
 
-def generate_provider_country_groups_yaml(providers, url_test_config):
+def get_residential_node_filter(country_filters=None):
+    if country_filters is None:
+        country_filters = get_country_node_filters()
+    ensure_residential_filter_file()
+    try:
+        config = json.loads(RESIDENTIAL_FILTER_PATH.read_text(encoding="utf-8-sig"))
+    except (ValueError, OSError) as error:
+        raise ValueError("无法读取 residential_filter.json，请检查文件和 JSON 格式。") from error
+    keywords = config.get("keywords") if isinstance(config, dict) else None
+    if not isinstance(keywords, list) or not keywords or any(
+        not isinstance(keyword, str) or not keyword.strip() or "\n" in keyword or "\r" in keyword
+        for keyword in keywords
+    ):
+        raise ValueError("residential_filter.json 中 keywords 必须是非空字符串数组。")
+    keywords = list(dict.fromkeys(keyword.strip() for keyword in keywords))
+    names = "(?i:" + "|".join(re.escape(keyword) for keyword in keywords) + ")"
+    if not country_filters:
+        return r"a^"  # Never allow an empty country selection to match every node.
+    countries = "(?:" + "|".join(scope_country_filter(node_filter) for _, node_filter in country_filters) + ")"
+    return rf"(?:{countries}.*{names}|{names}.*{countries})"
+
+
+def get_residential_providers(providers):
+    return [provider for provider in providers if provider.get("use_for_residential", False)]
+
+
+def get_provider_residential_groups(providers, country_filters=None):
+    """Return one residential group per opted-in provider across enabled countries."""
+    selected = get_residential_providers(providers)
+    if not selected:
+        return []
+    if country_filters is None:
+        country_filters = get_country_node_filters()
+    if not country_filters:
+        return []
+    node_filter = get_residential_node_filter(country_filters)
+    return [(f"{provider.get('name', 'Unknown')}·家宽", provider.get("name", "Unknown"), node_filter)
+            for provider in selected]
+
+
+def generate_provider_country_groups_yaml(providers, url_test_config, country_filters=None):
     """Generate latency-test groups that filter one provider to one country/region."""
-    groups = get_provider_country_groups(providers)
+    groups = get_provider_country_groups(providers, country_filters)
     lines = []
     for index, (group_name, provider_name, node_filter) in enumerate(groups):
         if index:
             lines.append("")
         prefix = "- name" if index == 0 else "  - name"
+        escaped_filter = node_filter.replace("'", "''")
         lines.extend(
             [
                 f"{prefix}: {group_name}",
@@ -2073,43 +2231,44 @@ def generate_provider_country_groups_yaml(providers, url_test_config):
                 *[f"    {line}" for line in get_url_test_option_lines(url_test_config)],
                 "    use:",
                 f"      - {provider_name}",
-                f"    filter: '{node_filter}'",
+                f"    filter: '{escaped_filter}'",
             ]
         )
     return "\n".join(lines)
 
 
-def generate_provider_country_references_yaml(providers):
+def generate_provider_country_references_yaml(providers, country_filters=None):
     """Generate proxy-group references for every airport/country pair."""
-    names = [group_name for group_name, _, _ in get_provider_country_groups(providers)]
+    names = [group_name for group_name, _, _ in get_provider_country_groups(providers, country_filters)]
     if not names:
         return ""
     return "\n".join([f"- {names[0]}", *[f"      - {name}" for name in names[1:]]])
 
 
-def generate_provider_residential_groups_yaml(providers):
+def generate_provider_residential_groups_yaml(providers, country_filters=None):
     """Generate one standalone residential manual group per opted-in provider."""
-    groups = get_provider_residential_groups(providers)
+    groups = get_provider_residential_groups(providers, country_filters)
     lines = []
     for index, (group_name, provider_name, node_filter) in enumerate(groups):
         if index:
             lines.append("")
         prefix = "- name" if index == 0 else "  - name"
+        escaped_filter = node_filter.replace("'", "''")
         lines.extend(
             [
                 f"{prefix}: {group_name}",
                 "    type: select",
                 "    use:",
                 f"      - {provider_name}",
-                f"    filter: '{node_filter}'",
+                f"    filter: '{escaped_filter}'",
             ]
         )
     return "\n".join(lines)
 
 
-def generate_residential_reference_yaml(providers):
+def generate_residential_reference_yaml(providers, country_filters=None):
     """Reference opted-in providers' residential groups directly."""
-    names = [group_name for group_name, _, _ in get_provider_residential_groups(providers)]
+    names = [name for name, _, _ in get_provider_residential_groups(providers, country_filters)]
     if not names:
         return ""
     return "\n".join([f"- {names[0]}", *[f"      - {name}" for name in names[1:]]])
@@ -2278,6 +2437,10 @@ def generate_full_openclash_config():
     provider_names = [p.get("name", "Unknown") for p in providers]
     ai_providers = get_ai_providers(providers)
     preamble = template["preamble"]
+    try:
+        country_filters = get_country_node_filters() if ai_providers or get_residential_providers(providers) else []
+    except (ValueError, OSError) as error:
+        return {"ok": False, "error": str(error)}
     if provider_names and "__ALLNODES__" in preamble:
         # First line inherits indentation from where __ALLNODES__ sits in the template
         provider_lines = [f"- {provider_names[0]}"]
@@ -2304,18 +2467,24 @@ def generate_full_openclash_config():
 
     if "__PROVIDER_COUNTRY_GROUPS__" in preamble:
         preamble = preamble.replace(
-            "__PROVIDER_COUNTRY_GROUPS__", generate_provider_country_groups_yaml(ai_providers, url_test_config)
+            "__PROVIDER_COUNTRY_GROUPS__", generate_provider_country_groups_yaml(ai_providers, url_test_config, country_filters)
         )
 
     if "__PROVIDER_RESIDENTIAL_GROUPS__" in preamble:
-        preamble = preamble.replace(
-            "__PROVIDER_RESIDENTIAL_GROUPS__", generate_provider_residential_groups_yaml(providers)
-        )
+        try:
+            preamble = preamble.replace(
+                "__PROVIDER_RESIDENTIAL_GROUPS__", generate_provider_residential_groups_yaml(providers, country_filters)
+            )
+        except (ValueError, OSError) as error:
+            return {"ok": False, "error": str(error)}
 
     if "__RESIDENTIAL_NODE__" in preamble:
-        preamble = preamble.replace(
-            "__RESIDENTIAL_NODE__", generate_residential_reference_yaml(providers)
-        )
+        try:
+            preamble = preamble.replace(
+                "__RESIDENTIAL_NODE__", generate_residential_reference_yaml(providers, country_filters)
+            )
+        except (ValueError, OSError) as error:
+            return {"ok": False, "error": str(error)}
 
     if "__URL_TEST_OPTIONS__" in preamble:
         preamble = preamble.replace(
@@ -2324,7 +2493,7 @@ def generate_full_openclash_config():
 
     if "__PROVIDER_COUNTRY_NODES__" in preamble:
         preamble = preamble.replace(
-            "__PROVIDER_COUNTRY_NODES__", generate_provider_country_references_yaml(ai_providers)
+            "__PROVIDER_COUNTRY_NODES__", generate_provider_country_references_yaml(ai_providers, country_filters)
         )
 
     if "__RULE_GROUPS__" in preamble:

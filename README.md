@@ -31,7 +31,8 @@
 |   `-- entrypoint.sh      # 容器启动与 cron 初始化
 |-- mapping/               # 运行时数据（gitignored）
 |   |-- bin/               # sing-box 二进制文件
-|   |-- config/            # config.json、subscribe.json、template.yaml、ports.json、.env
+|   |-- config/            # 订阅、模板、country_filter.json、residential_filter.json 等运行时配置
+|   |   |-- providers/     # 下载的机场完整订阅配置，命名为 机场名.yaml
 |   |-- rules/             # 用户规则 txt
 |   |-- rules-dat/         # 下载的 geosite / geoip JSON
 |   `-- rule-set/
@@ -170,7 +171,7 @@ OpenClash 配置模板，**私人配置，不提交 Git**。包含：
 |--------|--------|
 | `__ALLNODES__` | 全部节点（机场名列表，放 `proxies:` 引用机场组，放 `use:` 平铺所有节点） |
 | `__PROVIDER_GROUPS__` | 各机场策略组定义；`use_for_latency: true` 时为 url-test，否则为 select |
-| `__PROVIDER_COUNTRY_GROUPS__` | 所有启用 AI 的“机场·国家”延迟测速组定义，仅美国、新加坡、台湾、日本 |
+| `__PROVIDER_COUNTRY_GROUPS__` | 所有启用 AI 的“机场·国家”延迟测速组定义，国家及过滤规则由 country_filter.json 决定 |
 | `__PROVIDER_COUNTRY_NODES__` | 所有启用 AI 的“机场·国家”组名称列表，可嵌入 AI 的 `proxies:` |
 | `__PROVIDER_RESIDENTIAL_GROUPS__` | 每个勾选家宽的机场一个独立“机场·家宽”手动选择组定义；无人勾选时为空 |
 | `__RESIDENTIAL_NODE__` | 所有勾选家宽的“机场·家宽”组名称列表，可嵌入 AI 或其他策略组的 `proxies:`；无人勾选时为空 |
@@ -178,15 +179,42 @@ OpenClash 配置模板，**私人配置，不提交 Git**。包含：
 | `__PROXY_PROVIDERS__` | proxy-providers 插入位置 |
 | `__URL_TEST_OPTIONS__` | 统一的 url-test 参数（url、interval、tolerance、timeout、lazy） |
 
-订阅页面的“创建家宽策略组”默认不勾选，独立于 AI 开关。每个勾选的机场只生成一个独立的“机场·家宽”手动选择组，AI 直接引用各机场家宽组；无人勾选时不创建机场家宽组。每个机场家宽组仅引用对应机场的订阅，筛选名称同时包含“家宽”及美国、新加坡、台湾或日本地区标识的节点，四个地区合并在同一个组中。地区标识沿用国家组的中文、英文、地区缩写及城市名匹配规则。勾选后即创建组，不预先检查订阅中是否有匹配节点。
+订阅页面的家宽策略默认不勾选，独立于 AI 开关。每个勾选的机场只生成一个独立的“机场·家宽”手动选择组，AI 直接引用各机场家宽组；无人勾选时不创建机场家宽组。每个机场家宽组仅引用对应机场的订阅，筛选名称同时包含家宽关键词及任一已启用国家标识的节点，所有已启用国家的家宽节点合并在同一个组中。有已启用国家且勾选后即创建组，不预先检查订阅中是否有匹配节点。
+
+AI 国家组和家宽组共用 `mapping/config/country_filter.json`，默认包含美国、新加坡、台湾、日本，保留原有中文、英文、地区缩写及城市名过滤规则。配置格式如下（示例仅列出两个国家）：
+
+```json
+{
+  "countries": [
+    {"name": "美国", "enabled": true, "filter": "(?i)(美国|美國|\\bUS\\b|\\bUSA\\b|United States)"},
+    {"name": "日本", "enabled": true, "filter": "(?i)(日本|\\bJP\\b|\\bJPN\\b|Japan)"}
+  ]
+}
+```
+
+`name` 用于生成“机场·国家”组名，必须唯一；`enabled` 控制是否启用该国家，省略时为 `true`；`filter` 是节点名称的单行正则表达式，使用 Mihomo 支持的语法，建议以地区关键词的子串匹配为主。`(?i)` 表示忽略大小写，JSON 中正则的反斜杠需写成 `\\`。可增删国家或修改过滤规则，数组顺序决定每个机场的 AI 国家组顺序。禁用国家后，AI 不创建该国家组，家宽不再匹配该国家；全部禁用或设置 `countries: []` 时，两类组及其引用均不创建。模板内手写的普通地区策略组仍由模板定义。
+
+该文件在启动或首次生成相关组时自动创建，已有文件不覆盖；每次生成读取一次，AI 和家宽使用同一份国家配置。修改后重新生成即可生效，无需重启或修改模板。文件格式或过滤规则无效时生成报错，并保留已有完整配置。无人启用 AI 和家宽时不读取该文件。
+
+家宽关键词在 `mapping/config/residential_filter.json` 中配置，JSON 只定义名称识别，不包含国家：
+
+```json
+{
+  "keywords": ["家宽"]
+}
+```
+
+节点名包含任一关键词即满足家宽名称条件，不区分大小写，关键词按普通文本匹配（不是正则表达式）。可自行添加 `家寬`、`住宅`、`Residential` 等命名；仍需同时匹配 country_filter.json 中任一已启用国家的规则。文件在启动或首次生成家宽组时自动创建，已有文件不覆盖；修改后下次生成生效，无需重启。`keywords` 必须是非空字符串数组。这两个 JSON 与其他运行时配置一样不提交 Git，部署时可同步已有文件或由程序创建默认文件。
 
 现有模板需在 `proxy-groups:` 下加入 `__PROVIDER_RESIDENTIAL_GROUPS__`（缩进两个空格），并在 AI 等入口的 `proxies:` 下加入 `__RESIDENTIAL_NODE__`（缩进六个空格）。本地 `mapping/config/template.yaml` 已在现有版本上补充这些位置；部署时也需同步这份模板。
 
 订阅页面的“DNS 下发”默认不勾选，独立于 AI、家宽和测速开关。无人勾选时不下载订阅、不新增 DNS 策略，生成内容保持原样。勾选后在生成完整 OpenClash 配置时下载对应订阅（20 秒超时、最大 10 MiB），按机场单独 UA、全局 UA、`clash.meta` 的顺序选择 User-Agent；UA 为数组时使用第一项。
 
+在线配置成功下载且能提取 DNS 后，原始 YAML 自动保存到 `mapping/config/providers/机场名.yaml`（例如 `providers/MESL.yaml`），目录自动创建。HTTP 403、网络错误、返回无效或不含 DNS 的在线配置时，尝试从该目录的同名本地文件提取 DNS；可手动放入从机场下载的完整配置。首次为该机场执行 DNS 下发时，原来位于 `mapping/config/机场名.yaml` 的缓存自动迁移到 `providers/`；目标已存在则优先使用目标文件，不覆盖或删除旧文件。无效在线响应不会覆盖已有有效文件。生成结果显示所用本地文件名，并在 `full_config.dns_providers` 中返回来源 `source`（`download`/`local`）及回退原因。机场名须适用于文件名，不能包含斜杠等特殊字符或与 `template.yaml` 冲突。
+
 订阅须返回包含 `dns` 和内联 `proxies` 的完整 Clash/Mihomo YAML。优先提取 `dns.proxy-server-nameserver`，为空时使用 `dns.nameserver`；只筛选节点 `server` 中的域名，跳过 IPv4/IPv6，去重后合并到生成配置的 `dns.proxy-server-nameserver-policy`。其他 DNS 字段和 `fake-ip-filter` 保留模板值，不修改模板文件、不复制机场的全局 DNS。若模板没有 `proxy-server-nameserver`，使用模板原有 `nameserver` 或 `default-nameserver` 补齐，使定向策略生效。
 
-下载失败、订阅缺少 DNS/内联节点、同一节点域名对应不同 DNS、与模板已有同域名策略冲突时，完整配置生成会报错并保留原输出。策略按域名匹配，无法区分共用同一服务器域名的不同机场。节点或 DNS 更新后需重新生成并加载完整配置；客户端仅更新代理订阅不会更新这部分策略。本次新增 Python 依赖，已有 Docker 部署需执行 `docker compose up -d --build`。
+在线配置不可用且本地文件不存在或无效、同一节点域名对应不同 DNS、与模板已有同域名策略冲突时，完整配置生成会报错并保留原输出。策略按域名匹配，无法区分共用同一服务器域名的不同机场。节点或 DNS 更新后需重新生成并加载完整配置；客户端仅更新代理订阅不会更新这部分策略。DNS 下发需要 PyYAML 依赖，尚未安装依赖的旧 Docker 镜像需重新构建；本次本地回退及关键词配置更新只需同步代码后重启。
 
 #### rule_mapping 说明
 

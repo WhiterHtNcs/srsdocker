@@ -773,7 +773,7 @@
       useForDns.type = "checkbox";
       useForDns.checked = provider.use_for_dns === true;
       useForDns.dataset.field = "use_for_dns";
-      dnsField.title = "生成时提取订阅中的 DNS，仅用于该机场节点服务器域名解析；需提供包含 DNS 的完整 Clash/Mihomo 配置。";
+      dnsField.title = "生成时从订阅提取节点 DNS，成功后保存为 config/机场名.yaml；在线配置不可用时读取该本地文件。";
       dnsField.append(useForDns, document.createTextNode("DNS 下发"));
 
       const latencyField = document.createElement("label");
@@ -1069,8 +1069,11 @@
         const result = await postJson("/api/generate/openclash/all", {});
         showGenerateResult(result);
         const combinedPath = result.combined_output && result.combined_output.path ? `，汇总文件 ${result.combined_output.path}` : "";
+        const localDnsFiles = (result.full_config?.dns_providers || [])
+          .filter((provider) => provider.source === "local")
+          .map((provider) => provider.file);
         const fullConfigMsg = result.full_config?.ok
-          ? `，完整配置已生成（${result.full_config.proxy_providers?.length || 0} 个机场订阅${result.full_config.dns_providers?.length ? `，DNS 下发 ${result.full_config.dns_policy_count} 个节点域名` : ""}）`
+          ? `，完整配置已生成（${result.full_config.proxy_providers?.length || 0} 个机场订阅${result.full_config.dns_providers?.length ? `，DNS 下发 ${result.full_config.dns_policy_count} 个节点域名` : ""}${localDnsFiles.length ? `，使用本地配置：${localDnsFiles.join("、")}` : ""}）`
           : result.full_config
             ? `，完整配置生成失败：${result.full_config.error}`
             : "";
