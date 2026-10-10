@@ -505,8 +505,9 @@
         <button id="addProviderBtn" type="button">添加机场</button>
         <button id="saveSubscribeBtn" type="button">保存订阅</button>
         <button id="reloadSubscribeBtn" class="secondary" type="button">重新加载</button>
+        <button id="subscribeGenerateOpenClashBtn" class="secondary" type="button">生成 OpenClash</button>
       </div>
-      <p class="hint">使用每个机场右上角的上移、下移按钮调整顺序，完成后点击“保存订阅”。勾选“用于 AI 策略组”生成国家测速组；勾选“创建家宽策略组”后，每个机场只生成一个独立的“机场·家宽”手动选择组，仅包含美国、新加坡、台湾、日本且名称含“家宽”的节点。保存后需重新生成 OpenClash。</p>
+      <p class="hint">使用每个机场右上角的上移、下移按钮调整顺序，完成后点击“保存订阅”。保存后需重新生成</p>
 
       <div id="subscriptionList" class="subscription-list" aria-live="polite"></div>
       <div id="subscribeStatus" class="status"></div>
@@ -535,6 +536,7 @@
     const addProviderBtn = document.querySelector("#addProviderBtn");
     const saveSubscribeBtn = document.querySelector("#saveSubscribeBtn");
     const reloadSubscribeBtn = document.querySelector("#reloadSubscribeBtn");
+    const subscribeGenerateOpenClashBtn = document.querySelector("#subscribeGenerateOpenClashBtn");
     const ruleList = document.querySelector("#ruleList");
     const ruleName = document.querySelector("#ruleName");
     const ruleContent = document.querySelector("#ruleContent");
@@ -755,7 +757,7 @@
       useForAi.type = "checkbox";
       useForAi.checked = provider.use_for_ai !== false;
       useForAi.dataset.field = "use_for_ai";
-      aiField.append(useForAi, document.createTextNode("用于 AI 策略组"));
+      aiField.append(useForAi, document.createTextNode("AI 策略"));
 
       const residentialField = document.createElement("label");
       residentialField.className = "check-row";
@@ -763,7 +765,7 @@
       useForResidential.type = "checkbox";
       useForResidential.checked = provider.use_for_residential === true;
       useForResidential.dataset.field = "use_for_residential";
-      residentialField.append(useForResidential, document.createTextNode("创建家宽策略组"));
+      residentialField.append(useForResidential, document.createTextNode("家宽策略"));
 
       const dnsField = document.createElement("label");
       dnsField.className = "check-row";
@@ -780,7 +782,7 @@
       useForLatency.type = "checkbox";
       useForLatency.checked = provider.use_for_latency === true;
       useForLatency.dataset.field = "use_for_latency";
-      latencyField.append(useForLatency, document.createTextNode("机场组自动选择延迟最低节点"));
+      latencyField.append(useForLatency, document.createTextNode("自动选择"));
 
       const options = document.createElement("div");
       options.className = "provider-options wide";
@@ -1059,9 +1061,10 @@
       }
     }
 
-    async function generateOpenClashRules() {
-      setStatus("正在生成 OpenClash YAML...");
+    async function generateOpenClashRules(reportStatus = setStatus) {
+      reportStatus("正在生成 OpenClash YAML...");
       generateOpenClashBtn.disabled = true;
+      subscribeGenerateOpenClashBtn.disabled = true;
       try {
         const result = await postJson("/api/generate/openclash/all", {});
         showGenerateResult(result);
@@ -1071,9 +1074,10 @@
           : result.full_config
             ? `，完整配置生成失败：${result.full_config.error}`
             : "";
-        setStatus(`OpenClash 生成完成：成功 ${result.success_count} 个，失败 ${result.failure_count} 个${combinedPath}${fullConfigMsg}。`);
+        reportStatus(`OpenClash 生成完成：成功 ${result.success_count} 个，失败 ${result.failure_count} 个${combinedPath}${fullConfigMsg}。`);
       } finally {
         generateOpenClashBtn.disabled = false;
+        subscribeGenerateOpenClashBtn.disabled = false;
       }
     }
 
@@ -1117,6 +1121,10 @@
 
     reloadSubscribeBtn.addEventListener("click", () => {
       loadSubscriptions().then(() => setSubscribeStatus("订阅已重新加载。")).catch((error) => setSubscribeStatus(error.message));
+    });
+
+    subscribeGenerateOpenClashBtn.addEventListener("click", () => {
+      generateOpenClashRules(setSubscribeStatus).catch((error) => setSubscribeStatus(error.message));
     });
 
     document.querySelector("#loadRulesBtn").addEventListener("click", () => {
