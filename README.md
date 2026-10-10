@@ -1,6 +1,6 @@
 # singbox-srs-generator
 
-一个使用 Python 标准库实现的 sing-box 规则集生成工具，支持生成 **sing-box SRS 二进制规则集** 和 **完整 OpenClash 配置文件**。
+一个使用 Python 实现的 sing-box 规则集生成工具，支持生成 **sing-box SRS 二进制规则集** 和 **完整 OpenClash 配置文件**。
 
 ## 功能
 
@@ -10,19 +10,21 @@
 - **OpenClash 完整配置生成**：
   - 从 `mapping/config/subscribe.json` 读取多机场订阅，生成 `proxy-providers`
   - 从 `mapping/config/template.yaml` 读取策略组结构，自动填充提供商列表
+  - 可按机场启用 DNS 下发，从完整订阅配置提取 DNS，仅适配对应节点服务器域名
   - 从 `mapping/rules/*.txt` 读取规则，内联到 `rules:` 节（无需外部文件引用）
   - IP 规则自动合并（`Direct.txt` + `DirectIP.txt` → `Direct`）
   - 每条规则类别自动生成独立 select 策略组，可手动选节点
 - **远程规则同步**：按规则集中使用到的 `geosite:` / `geoip:` 下载对应 JSON
 - GitHub token 支持：通过前端配置或 Docker 环境变量 `GITHUB_TOKEN` 配置
 - Docker 部署：内置端口 `9044`
-- 无 Python 第三方依赖
+- DNS 下发使用 PyYAML 解析订阅配置，Docker 构建时自动安装
 
 ## 目录结构
 
 ```text
 .
 |-- app.py                 # 后端 HTTP 服务
+|-- requirements.txt       # Python 依赖（PyYAML）
 |-- Dockerfile
 |-- docker-compose.yml
 |-- docker/
@@ -91,6 +93,7 @@ docker compose up -d --force-recreate
 ### 本地运行
 
 ```bash
+python -m pip install -r requirements.txt
 python app.py
 ```
 
@@ -113,6 +116,7 @@ python app.py
       "interval": 86400,
       "use_for_ai": true,
       "use_for_residential": false,
+      "use_for_dns": false,
       "use_for_latency": false,
       "override": {
         "additional-prefix": "Main："
@@ -131,6 +135,7 @@ python app.py
 | `providers[].health_check` | 可选，健康检查配置 |
 | `providers[].use_for_ai` | 是否为 AI 策略组生成“机场·国家”测速组，默认 `true` |
 | `providers[].use_for_residential` | 是否创建该机场的家宽手动选择组，独立于 AI 开关，默认 `false` |
+| `providers[].use_for_dns` | 是否从订阅提取 DNS 并为该机场节点服务器域名生成定向解析策略，默认 `false` |
 | `providers[].use_for_latency` | 是否让该机场组自动选择延迟最低节点，默认 `false` |
 | `providers[].override.additional-prefix` | 节点名前缀 |
 
@@ -183,6 +188,12 @@ OpenClash 配置模板，**私人配置，不提交 Git**。包含：
 
 现有模板需在 `proxy-groups:` 下加入 `__PROVIDER_RESIDENTIAL_GROUPS__`（缩进两个空格），并在 AI 等入口的 `proxies:` 下加入 `__RESIDENTIAL_NODE__`（缩进六个空格）。本地 `mapping/config/template.yaml` 已在现有版本上补充这些位置；部署时也需同步这份模板。
 
+订阅页面的“DNS 下发”默认不勾选，独立于 AI、家宽和测速开关。无人勾选时不下载订阅、不新增 DNS 策略，生成内容保持原样。勾选后在生成完整 OpenClash 配置时下载对应订阅（20 秒超时、最大 10 MiB），按机场单独 UA、全局 UA、`clash.meta` 的顺序选择 User-Agent；UA 为数组时使用第一项。
+
+订阅须返回包含 `dns` 和内联 `proxies` 的完整 Clash/Mihomo YAML。优先提取 `dns.proxy-server-nameserver`，为空时使用 `dns.nameserver`；只筛选节点 `server` 中的域名，跳过 IPv4/IPv6，去重后合并到生成配置的 `dns.proxy-server-nameserver-policy`。其他 DNS 字段和 `fake-ip-filter` 保留模板值，不修改模板文件、不复制机场的全局 DNS。若模板没有 `proxy-server-nameserver`，使用模板原有 `nameserver` 或 `default-nameserver` 补齐，使定向策略生效。
+
+下载失败、订阅缺少 DNS/内联节点、同一节点域名对应不同 DNS、与模板已有同域名策略冲突时，完整配置生成会报错并保留原输出。策略按域名匹配，无法区分共用同一服务器域名的不同机场。节点或 DNS 更新后需重新生成并加载完整配置；客户端仅更新代理订阅不会更新这部分策略。本次新增 Python 依赖，已有 Docker 部署需执行 `docker compose up -d --build`。
+
 #### rule_mapping 说明
 
 ```yaml
@@ -224,7 +235,7 @@ generate_all_openclash_rules()
 | 路径 | 方法 | 说明 |
 |------|------|------|
 | `/api/config` | GET / POST | 获取或更新远程规则与定时任务配置 |
-| `/api/subscribe` | GET / POST | 获取或保存机场订阅、全局 User-Agent 与 AI 开关 |
+| `/api/subscribe` | GET / POST | 获取或保存机场订阅、全局 User-Agent 与 AI、家宽、DNS、测速开关 |
 | `/api/rules` | GET | 获取规则列表 |
 | `/api/rules/order` | GET / POST | 获取或更新规则显示顺序 |
 | `/api/rules/create`、`/api/rules/update`、`/api/rules/delete` | POST | 管理规则文件 |

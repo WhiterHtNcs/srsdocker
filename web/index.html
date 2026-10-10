@@ -749,6 +749,15 @@
       useForResidential.dataset.field = "use_for_residential";
       residentialField.append(useForResidential, document.createTextNode("创建家宽策略组"));
 
+      const dnsField = document.createElement("label");
+      dnsField.className = "check-row wide";
+      const useForDns = document.createElement("input");
+      useForDns.type = "checkbox";
+      useForDns.checked = provider.use_for_dns === true;
+      useForDns.dataset.field = "use_for_dns";
+      dnsField.title = "生成时提取订阅中的 DNS，仅用于该机场节点服务器域名解析；需提供包含 DNS 的完整 Clash/Mihomo 配置。";
+      dnsField.append(useForDns, document.createTextNode("DNS 下发"));
+
       const latencyField = document.createElement("label");
       latencyField.className = "check-row wide";
       const useForLatency = document.createElement("input");
@@ -757,7 +766,7 @@
       useForLatency.dataset.field = "use_for_latency";
       latencyField.append(useForLatency, document.createTextNode("机场组自动选择延迟最低节点"));
 
-      grid.append(name.field, interval.field, url.field, aiField, residentialField, latencyField);
+      grid.append(name.field, interval.field, url.field, aiField, residentialField, dnsField, latencyField);
       card.append(heading, grid);
       return card;
     }
@@ -816,6 +825,7 @@
         provider.interval = Number(card.querySelector('[data-field="interval"]').value);
         provider.use_for_ai = card.querySelector('[data-field="use_for_ai"]').checked;
         provider.use_for_residential = card.querySelector('[data-field="use_for_residential"]').checked;
+        provider.use_for_dns = card.querySelector('[data-field="use_for_dns"]').checked;
         provider.use_for_latency = card.querySelector('[data-field="use_for_latency"]').checked;
         return provider;
       });
@@ -1038,7 +1048,7 @@
         showGenerateResult(result);
         const combinedPath = result.combined_output && result.combined_output.path ? `，汇总文件 ${result.combined_output.path}` : "";
         const fullConfigMsg = result.full_config?.ok
-          ? `，完整配置已生成（${result.full_config.proxy_providers?.length || 0} 个机场订阅）`
+          ? `，完整配置已生成（${result.full_config.proxy_providers?.length || 0} 个机场订阅${result.full_config.dns_providers?.length ? `，DNS 下发 ${result.full_config.dns_policy_count} 个节点域名` : ""}）`
           : result.full_config
             ? `，完整配置生成失败：${result.full_config.error}`
             : "";
@@ -1077,7 +1087,7 @@
       if (empty) {
         empty.remove();
       }
-      subscriptionList.append(createProviderCard({interval: 86400, use_for_ai: true, use_for_residential: false, use_for_latency: false}));
+      subscriptionList.append(createProviderCard({interval: 86400, use_for_ai: true, use_for_residential: false, use_for_dns: false, use_for_latency: false}));
       updateProviderOrderControls();
       setSubscribeStatus("请填写机场名称和订阅地址后保存。");
     });

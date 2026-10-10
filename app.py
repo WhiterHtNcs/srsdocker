@@ -1653,23 +1653,25 @@ def generate_all_openclash_rules():
     combined_output = None
     full_config_result = None
     if failure_count == 0:
-        # Backward-compatible combined payload
         output_path = OPENCLASH_DIR / OPENCLASH_ALL_FILENAME
-        write_text_file_atomic(output_path, dump_openclash_yaml(combined_payload))
-        combined_output = {
-            "path": str(output_path.relative_to(BASE_DIR)),
-            "payload_count": len(combined_payload),
-            "skipped": skipped,
-        }
-
-        # Generate full OpenClash config (overwrites openclash.yaml)
+        # Do not replace an existing full config with rule-only YAML before DNS
+        # downloads/validation succeed. Retain the legacy output without a template.
+        has_template = TEMPLATE_PATH.exists()
         try:
             full_config_result = generate_full_openclash_config()
         except Exception as error:
             full_config_result = {"ok": False, "error": str(error)}
+        if not has_template:
+            write_text_file_atomic(output_path, dump_openclash_yaml(combined_payload))
+        if not has_template or full_config_result.get("ok"):
+            combined_output = {
+                "path": str(output_path.relative_to(BASE_DIR)),
+                "payload_count": len(combined_payload),
+                "skipped": skipped,
+            }
 
     return {
-        "ok": failure_count == 0,
+        "ok": failure_count == 0 and combined_output is not None,
         "total": len(results),
         "success_count": success_count,
         "failure_count": failure_count,
@@ -1773,7 +1775,11 @@ def validate_subscribe_data(payload):
         if not isinstance(use_for_residential, bool):
             raise ValueError(f"Provider {index} use_for_residential must be true or false.")
 
-        canonical_keys = {"name", "url", "interval", "use_for_ai", "use_for_latency", "use_for_residential"}
+        use_for_dns = provider.get("use_for_dns", False)
+        if not isinstance(use_for_dns, bool):
+            raise ValueError(f"Provider {index} use_for_dns must be true or false.")
+
+        canonical_keys = {"name", "url", "interval", "use_for_ai", "use_for_latency", "use_for_residential", "use_for_dns"}
         normalized_provider = {
             "name": name,
             "url": url,
@@ -1781,6 +1787,7 @@ def validate_subscribe_data(payload):
             "use_for_ai": use_for_ai,
             "use_for_latency": use_for_latency,
             "use_for_residential": use_for_residential,
+            "use_for_dns": use_for_dns,
         }
         normalized_provider.update(
             {key: value for key, value in provider.items() if key not in canonical_keys}
@@ -1799,6 +1806,154 @@ def save_subscribe_data(data):
             SUBSCRIBE_PATH,
             json.dumps(data, ensure_ascii=False, indent=2) + "\n",
         )
+
+
+def download_provider_subscription(provider, global_user_agent=None):
+    """Download a full Clash subscription only when DNS adaptation is enabled."""
+    user_agent = provider.get("user_agent") or global_user_agent or "clash.meta"
+    if isinstance(user_agent, list):
+        user_agent = user_agent[0] if user_agent else "clash.meta"
+    request = urllib.request.Request(
+        validate_download_url(provider.get("url", "")),
+        headers={"User-Agent": str(user_agent), "Accept": "application/yaml, text/yaml, */*"},
+    )
+    max_bytes = 10 * 1024 * 1024
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            content = response.read(max_bytes + 1)
+    except urllib.error.HTTPError as error:
+        raise ValueError(f"下载订阅失败（HTTP {error.code}）。") from error
+    except (OSError, urllib.error.URLError, TimeoutError) as error:
+        # Do not expose subscription URLs/tokens in API errors.
+        raise ValueError("下载订阅失败，请检查订阅地址及网络连接。") from error
+    if len(content) > max_bytes:
+        raise ValueError("订阅配置超过 10 MiB，无法提取 DNS。")
+    try:
+        return content.decode("utf-8-sig")
+    except UnicodeDecodeError as error:
+        raise ValueError("订阅不是 UTF-8 编码的 Clash/Mihomo 配置。") from error
+
+
+def get_yaml_module():
+    # Existing installations can continue to generate without DNS adaptation.
+    try:
+        import yaml
+    except ImportError as error:
+        raise ValueError("DNS 下发需要 PyYAML，请重新构建 Docker 镜像或安装 requirements.txt。") from error
+    return yaml
+
+
+def extract_subscription_dns_policy(content):
+    """Map inline node server domains to the subscription's DNS resolvers."""
+    yaml = get_yaml_module()
+    try:
+        config = yaml.safe_load(content)
+    except yaml.YAMLError as error:
+        raise ValueError("订阅不是有效的 Clash/Mihomo YAML 配置。") from error
+    if not isinstance(config, dict) or not isinstance(config.get("dns"), dict):
+        raise ValueError("订阅中没有 DNS，请使用包含 dns 的完整 Clash/Mihomo 配置。")
+    dns = config["dns"]
+    resolvers = dns.get("proxy-server-nameserver") or dns.get("nameserver")
+    if isinstance(resolvers, str):
+        resolvers = [resolvers]
+    if not isinstance(resolvers, list) or not resolvers or any(
+        not isinstance(item, str) or not item.strip() for item in resolvers
+    ):
+        raise ValueError("订阅中没有有效的 DNS 服务器列表。")
+    resolvers = list(dict.fromkeys(item.strip() for item in resolvers))
+    proxies = config.get("proxies")
+    if not isinstance(proxies, list) or not proxies:
+        raise ValueError("订阅中没有内联节点，无法提取节点服务器域名。")
+    policy = {}
+    for proxy in proxies:
+        if not isinstance(proxy, dict) or not isinstance(proxy.get("server"), str):
+            raise ValueError("订阅节点缺少有效的 server 字段。")
+        server = proxy["server"].strip().rstrip(".")
+        try:
+            ipaddress.ip_address(server.strip("[]"))
+            continue
+        except ValueError:
+            pass
+        try:
+            domain = server.encode("idna").decode("ascii").lower()
+        except UnicodeError as error:
+            raise ValueError("订阅包含无效的节点服务器域名。") from error
+        if len(domain) > 253 or not re.fullmatch(
+            r"[a-z0-9](?:[a-z0-9_.-]*[a-z0-9])?", domain
+        ) or any(not label or len(label) > 63 for label in domain.split(".")):
+            raise ValueError("订阅包含无效的节点服务器域名。")
+        policy[domain] = list(resolvers)
+    return policy
+
+
+def apply_provider_dns_policy(full_yaml, providers, global_user_agent=None):
+    """Merge exact node-domain policies; keep unselected output byte-identical."""
+    selected = [provider for provider in providers if provider.get("use_for_dns", False) is True]
+    if not selected:
+        return full_yaml, {"dns_policy_count": 0, "dns_providers": []}
+    incoming = {}
+    adapted = []
+    for provider in selected:
+        name = provider.get("name", "Unknown")
+        try:
+            policy = extract_subscription_dns_policy(download_provider_subscription(provider, global_user_agent))
+        except ValueError as error:
+            raise ValueError(f"机场「{name}」DNS 下发失败：{error}") from error
+        for domain, resolvers in policy.items():
+            if domain in incoming and set(incoming[domain]) != set(resolvers):
+                raise ValueError(f"机场「{name}」DNS 策略冲突：多个机场对同一节点域名指定了不同 DNS。")
+            incoming[domain] = resolvers
+        adapted.append({"name": name, "domain_count": len(policy)})
+    info = {"dns_policy_count": len(incoming), "dns_providers": adapted}
+    if not incoming:
+        return full_yaml, info
+    yaml = get_yaml_module()
+    try:
+        config = yaml.safe_load(full_yaml)
+        root = yaml.compose(full_yaml, Loader=yaml.SafeLoader)
+    except yaml.YAMLError as error:
+        raise ValueError("生成配置的 YAML 无效，无法合并 DNS 策略。") from error
+    dns = config.get("dns") if isinstance(config, dict) else None
+    if not isinstance(dns, dict) or dns.get("enable") is not True:
+        raise ValueError("DNS 下发需要在模板中启用 dns.enable。")
+    existing = dns.get("proxy-server-nameserver-policy", {})
+    if not isinstance(existing, dict):
+        raise ValueError("模板中的 proxy-server-nameserver-policy 必须是映射。")
+    existing = dict(existing)
+    group_names = {group.get("name") for group in config.get("proxy-groups", []) if isinstance(group, dict)}
+    proxy_names = {proxy.get("name") for proxy in config.get("proxies", []) if isinstance(proxy, dict)}
+    for domain, resolvers in incoming.items():
+        for resolver in resolvers:
+            # Subscription-only proxy group names cannot be carried into our template.
+            fragment = resolver.partition("#")[2].split("&", 1)[0]
+            if fragment and "=" not in fragment and fragment not in {
+                "DIRECT", "RULES", "h3", "skip-cert-verify", "disable-ipv4", "disable-ipv6"
+            } | group_names | proxy_names:
+                raise ValueError("订阅 DNS 引用了生成配置中不存在的代理或接口，请使用直连 DNS 地址。")
+        if domain in existing:
+            current = existing[domain]
+            if isinstance(current, str):
+                current = [current]
+            if not isinstance(current, list) or set(current) != set(resolvers):
+                raise ValueError("下发 DNS 与模板中已有的节点域名 DNS 策略冲突。")
+        existing[domain] = resolvers
+    dns["proxy-server-nameserver-policy"] = existing
+    if not dns.get("proxy-server-nameserver"):
+        baseline = dns.get("nameserver") or dns.get("default-nameserver")
+        if not baseline:
+            raise ValueError("模板需配置 proxy-server-nameserver 或 nameserver，避免改变其他机场的解析。")
+        dns["proxy-server-nameserver"] = baseline
+    # Replace only the generated DNS section; preserve the rest of the configuration.
+    dns_key, dns_value = next((key, value) for key, value in root.value if key.value == "dns")
+    replacement = yaml.safe_dump({"dns": dns}, allow_unicode=True, sort_keys=False)
+    if dns_value.flow_style:
+        replacement = replacement.rstrip("\n")
+    full_yaml = full_yaml[:dns_key.start_mark.index] + replacement + full_yaml[dns_value.end_mark.index:]
+    try:
+        yaml.safe_load(full_yaml)
+    except yaml.YAMLError as error:
+        raise ValueError("DNS 合并后的 YAML 无效，请检查模板中的 YAML 锚点引用。") from error
+    return full_yaml, info
 
 
 def generate_proxy_providers_yaml(providers, global_user_agent=None):
@@ -2216,6 +2371,11 @@ def generate_full_openclash_config():
 
     full_yaml = "\n".join(parts)
 
+    try:
+        full_yaml, dns_info = apply_provider_dns_policy(full_yaml, providers, global_ua)
+    except ValueError as error:
+        return {"ok": False, "error": str(error)}
+
     # Step 5: Write output
     output_path = OPENCLASH_DIR / OPENCLASH_ALL_FILENAME
     write_text_file_atomic(output_path, full_yaml)
@@ -2226,6 +2386,7 @@ def generate_full_openclash_config():
         "mapping_count": len(rule_mapping),
         "provider_count": len(providers),
         "proxy_providers": [p.get("name", "Unknown") for p in providers],
+        **dns_info,
     }
 
 
