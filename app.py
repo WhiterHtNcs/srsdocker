@@ -2410,6 +2410,11 @@ class AppHandler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(WEB_DIR), **kwargs)
 
+    def end_headers(self):
+        if urlparse(self.path).path in ("/", "/index.html"):
+            self.send_header("Cache-Control", "no-store")
+        super().end_headers()
+
     def do_GET(self):
         parsed = urlparse(self.path)
 
@@ -2440,8 +2445,12 @@ class AppHandler(SimpleHTTPRequestHandler):
             self.send_json({"rules_dat_dir": str(RULES_DAT_DIR), "files": get_remote_rule_files()})
             return
 
-        if parsed.path == "/":
+        if parsed.path in ("/", "/index.html"):
             self.path = "/index.html"
+            # The frontend is an inline HTML/JS page. Always serve the current
+            # file so source updates do not leave the browser using stale code.
+            del self.headers["If-Modified-Since"]
+            del self.headers["If-None-Match"]
 
         super().do_GET()
 
