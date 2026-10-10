@@ -85,6 +85,16 @@ COUNTRY_NODE_FILTERS = (
     ("英国", r"(?i)(英国|英國|\bUK\b|\bGB\b|\bGBR\b|United Kingdom|London|伦敦|倫敦|曼彻斯特|曼徹斯特)"),
 )
 
+RESIDENTIAL_COUNTRIES = ("美国", "新加坡", "台湾", "日本")
+RESIDENTIAL_COUNTRY_FILTER = "(?:" + "|".join(
+    node_filter.removeprefix("(?i)")
+    for country, node_filter in COUNTRY_NODE_FILTERS
+    if country in RESIDENTIAL_COUNTRIES
+) + ")"
+RESIDENTIAL_NODE_FILTER = (
+    rf"(?i)(?:{RESIDENTIAL_COUNTRY_FILTER}.*家宽|家宽.*{RESIDENTIAL_COUNTRY_FILTER})"
+)
+
 
 class RuleConversionError(Exception):
     def __init__(self, message, result=None):
@@ -1760,13 +1770,18 @@ def validate_subscribe_data(payload):
         if not isinstance(use_for_latency, bool):
             raise ValueError(f"Provider {index} use_for_latency must be true or false.")
 
-        canonical_keys = {"name", "url", "interval", "use_for_ai", "use_for_latency"}
+        use_for_residential = provider.get("use_for_residential", False)
+        if not isinstance(use_for_residential, bool):
+            raise ValueError(f"Provider {index} use_for_residential must be true or false.")
+
+        canonical_keys = {"name", "url", "interval", "use_for_ai", "use_for_latency", "use_for_residential"}
         normalized_provider = {
             "name": name,
             "url": url,
             "interval": interval,
             "use_for_ai": use_for_ai,
             "use_for_latency": use_for_latency,
+            "use_for_residential": use_for_residential,
         }
         normalized_provider.update(
             {key: value for key, value in provider.items() if key not in canonical_keys}
@@ -1880,6 +1895,15 @@ def get_ai_providers(providers):
     return [provider for provider in providers if provider.get("use_for_ai", True)]
 
 
+def get_provider_residential_groups(providers):
+    """Return one residential group per opted-in provider, combining four regions."""
+    return [
+        (f"{provider.get('name', 'Unknown')}·家宽", provider.get("name", "Unknown"), RESIDENTIAL_NODE_FILTER)
+        for provider in providers
+        if provider.get("use_for_residential", False)
+    ]
+
+
 def generate_provider_country_groups_yaml(providers, url_test_config):
     """Generate latency-test groups that filter one provider to one country/region."""
     groups = get_provider_country_groups(providers)
@@ -1907,6 +1931,32 @@ def generate_provider_country_references_yaml(providers):
     if not names:
         return ""
     return "\n".join([f"- {names[0]}", *[f"      - {name}" for name in names[1:]]])
+
+
+def generate_provider_residential_groups_yaml(providers):
+    """Generate a separate residential selector and its per-provider manual groups."""
+    groups = get_provider_residential_groups(providers)
+    if not groups:
+        return ""
+    lines = ["- name: 家宽", "    type: select", "    proxies:"]
+    lines.extend(f"      - {group_name}" for group_name, _, _ in groups)
+    for group_name, provider_name, node_filter in groups:
+        lines.extend(
+            [
+                "",
+                f"  - name: {group_name}",
+                "    type: select",
+                "    use:",
+                f"      - {provider_name}",
+                f"    filter: '{node_filter}'",
+            ]
+        )
+    return "\n".join(lines)
+
+
+def generate_residential_reference_yaml(providers):
+    """Expose the residential entry only when at least one provider opted in."""
+    return "- 家宽" if get_provider_residential_groups(providers) else ""
 
 
 def read_template():
@@ -2099,6 +2149,16 @@ def generate_full_openclash_config():
     if "__PROVIDER_COUNTRY_GROUPS__" in preamble:
         preamble = preamble.replace(
             "__PROVIDER_COUNTRY_GROUPS__", generate_provider_country_groups_yaml(ai_providers, url_test_config)
+        )
+
+    if "__PROVIDER_RESIDENTIAL_GROUPS__" in preamble:
+        preamble = preamble.replace(
+            "__PROVIDER_RESIDENTIAL_GROUPS__", generate_provider_residential_groups_yaml(providers)
+        )
+
+    if "__RESIDENTIAL_NODE__" in preamble:
+        preamble = preamble.replace(
+            "__RESIDENTIAL_NODE__", generate_residential_reference_yaml(providers)
         )
 
     if "__URL_TEST_OPTIONS__" in preamble:

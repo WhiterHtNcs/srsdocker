@@ -112,6 +112,7 @@ python app.py
       "url": "https://your-subscribe-url",
       "interval": 86400,
       "use_for_ai": true,
+      "use_for_residential": false,
       "use_for_latency": false,
       "override": {
         "additional-prefix": "Main："
@@ -128,7 +129,8 @@ python app.py
 | `providers[].url` | 订阅地址 |
 | `providers[].interval` | 更新间隔（秒，默认 86400） |
 | `providers[].health_check` | 可选，健康检查配置 |
-| `providers[].use_for_ai` | 是否为 AI 策略组生成“机场·国家”节点组，默认 `true` |
+| `providers[].use_for_ai` | 是否为 AI 策略组生成“机场·国家”测速组，默认 `true` |
+| `providers[].use_for_residential` | 是否创建该机场的家宽手动选择组，独立于 AI 开关，默认 `false` |
 | `providers[].use_for_latency` | 是否让该机场组自动选择延迟最低节点，默认 `false` |
 | `providers[].override.additional-prefix` | 节点名前缀 |
 
@@ -171,9 +173,15 @@ OpenClash 配置模板，**私人配置，不提交 Git**。包含：
 | `__PROVIDER_GROUPS__` | 各机场策略组定义；`use_for_latency: true` 时为 url-test，否则为 select |
 | `__PROVIDER_COUNTRY_GROUPS__` | 所有启用 AI 的“机场·国家”延迟测速组定义 |
 | `__PROVIDER_COUNTRY_NODES__` | 所有启用 AI 的“机场·国家”组名称列表，可嵌入 AI 的 `proxies:` |
+| `__PROVIDER_RESIDENTIAL_GROUPS__` | 独立的“家宽”总组及勾选家宽的“机场·家宽”手动选择组定义；无人勾选时为空 |
+| `__RESIDENTIAL_NODE__` | `- 家宽`，可嵌入 AI 或其他策略组的 `proxies:`；无人勾选时为空 |
 | `__RULE_GROUPS__` | 各规则类别对应的 select 策略组（rule_mapping 中值=键的条目） |
 | `__PROXY_PROVIDERS__` | proxy-providers 插入位置 |
 | `__URL_TEST_OPTIONS__` | 统一的 url-test 参数（url、interval、tolerance、timeout、lazy） |
+
+订阅页面的“创建家宽策略组”默认不勾选，独立于 AI 开关。每个勾选的机场只生成一个“机场·家宽”手动选择组，统一放在独立的“家宽”总组中，AI 通过“家宽”入口选择；无人勾选时不创建家宽总组或机场家宽组。每个机场家宽组仅引用对应机场的订阅，筛选名称同时包含“家宽”及美国、新加坡、台湾或日本地区标识的节点，四个地区合并在同一个组中。地区标识沿用国家组的中文、英文、地区缩写及城市名匹配规则。勾选后即创建组，不预先检查订阅中是否有匹配节点。
+
+现有模板需在 `proxy-groups:` 下加入 `__PROVIDER_RESIDENTIAL_GROUPS__`（缩进两个空格），并在 AI 等入口的 `proxies:` 下加入 `__RESIDENTIAL_NODE__`（缩进六个空格）。本地 `mapping/config/template.yaml` 已在现有版本上补充这些位置；部署时也需同步这份模板。
 
 #### rule_mapping 说明
 
@@ -182,7 +190,7 @@ rule_mapping:
   Direct: 🌐 本机·本地直连   # 固定路由
   HighTraffic: HighTraffic   # 值=键 → 自动生成 select 策略组
   AI: AI                     # 同上，可在面板手动选节点
-  Proxy: Proxies             # 引用现有的 Proxies 组
+  Proxy: Proxy               # 对应现有的 Proxy 组
 ```
 
 ## 生成逻辑

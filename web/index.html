@@ -490,7 +490,7 @@
         <button id="saveSubscribeBtn" type="button">保存订阅</button>
         <button id="reloadSubscribeBtn" class="secondary" type="button">重新加载</button>
       </div>
-      <p class="hint">使用每个机场右上角的上移、下移按钮调整顺序，完成后点击“保存订阅”。</p>
+      <p class="hint">使用每个机场右上角的上移、下移按钮调整顺序，完成后点击“保存订阅”。勾选“用于 AI 策略组”生成国家测速组；勾选“创建家宽策略组”生成该机场的家宽手动选择组，集中在独立的“家宽”入口中，仅包含美国、新加坡、台湾、日本且名称含“家宽”的节点。保存后需重新生成 OpenClash。</p>
 
       <div id="subscriptionList" class="subscription-list" aria-live="polite"></div>
       <div id="subscribeStatus" class="status"></div>
@@ -741,6 +741,14 @@
       useForAi.dataset.field = "use_for_ai";
       aiField.append(useForAi, document.createTextNode("用于 AI 策略组"));
 
+      const residentialField = document.createElement("label");
+      residentialField.className = "check-row wide";
+      const useForResidential = document.createElement("input");
+      useForResidential.type = "checkbox";
+      useForResidential.checked = provider.use_for_residential === true;
+      useForResidential.dataset.field = "use_for_residential";
+      residentialField.append(useForResidential, document.createTextNode("创建家宽策略组"));
+
       const latencyField = document.createElement("label");
       latencyField.className = "check-row wide";
       const useForLatency = document.createElement("input");
@@ -749,7 +757,7 @@
       useForLatency.dataset.field = "use_for_latency";
       latencyField.append(useForLatency, document.createTextNode("机场组自动选择延迟最低节点"));
 
-      grid.append(name.field, interval.field, url.field, aiField, latencyField);
+      grid.append(name.field, interval.field, url.field, aiField, residentialField, latencyField);
       card.append(heading, grid);
       return card;
     }
@@ -807,6 +815,7 @@
         provider.url = card.querySelector('[data-field="url"]').value.trim();
         provider.interval = Number(card.querySelector('[data-field="interval"]').value);
         provider.use_for_ai = card.querySelector('[data-field="use_for_ai"]').checked;
+        provider.use_for_residential = card.querySelector('[data-field="use_for_residential"]').checked;
         provider.use_for_latency = card.querySelector('[data-field="use_for_latency"]').checked;
         return provider;
       });
@@ -1068,7 +1077,7 @@
       if (empty) {
         empty.remove();
       }
-      subscriptionList.append(createProviderCard({interval: 86400, use_for_ai: true, use_for_latency: false}));
+      subscriptionList.append(createProviderCard({interval: 86400, use_for_ai: true, use_for_residential: false, use_for_latency: false}));
       updateProviderOrderControls();
       setSubscribeStatus("请填写机场名称和订阅地址后保存。");
     });
