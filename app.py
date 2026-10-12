@@ -1136,6 +1136,10 @@ def convert_to_singbox_json(rule_lines):
         if not line or line.startswith("#"):
             continue
 
+        if line.startswith("ipasn:"):
+            # ASN rules are OpenClash-only and do not enter SRS rule sets.
+            continue
+
         geo_reference = parse_geo_reference(line)
         if geo_reference:
             kind, code = geo_reference
@@ -1281,6 +1285,17 @@ def convert_to_openclash_yaml(rule_lines, rule_target=None):
     for line_number, raw_line in enumerate(rule_lines, start=1):
         line = raw_line.strip()
         if not line or line.startswith("#"):
+            continue
+
+        if line.startswith("ipasn:"):
+            value = line[len("ipasn:") :].strip()
+            match = re.fullmatch(r"AS([0-9]{1,10})", value, flags=re.IGNORECASE)
+            if not match or not 1 <= int(match[1]) <= 4294967295:
+                raise ValueError(f"Line {line_number}: ipasn must be AS followed by an ASN from 1 to 4294967295.")
+            append_openclash_rule(
+                payload, seen, "IP-ASN", str(int(match[1])),
+                options=openclash_rule_options(rule_target),
+            )
             continue
 
         geo_reference = parse_geo_reference(line)

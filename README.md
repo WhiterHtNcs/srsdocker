@@ -228,6 +228,18 @@ rule_mapping:
 
 ## 生成逻辑
 
+### ASN 规则（仅 OpenClash）
+
+规则文件支持每行填写 `ipasn:AS399358`，转换为 OpenClash 的 `IP-ASN,399358`。完整配置根据 `rule_mapping` 追加策略组，例如在 `AIIP.txt` 中填写该规则，且已有 `AI.txt` 和 `AI: AI` 映射时，合并后生成：
+
+```yaml
+- IP-ASN,399358,AI
+```
+
+前缀使用小写 `ipasn:`，值使用 `AS` 加 ASN 数字（`AS` 不区分大小写，数字范围为 1–4294967295）。格式或数字无效时，OpenClash 转换会报告所在行。规则匹配依赖客户端 Mihomo 的 ASN 数据库，不会在生成时下载或展开路由前缀。原有 `keyword:` 仍转换为 `DOMAIN-KEYWORD`。
+
+生成 sing-box JSON/SRS 时直接跳过所有 `ipasn:` 行，其他规则正常生成；仅包含 ASN 行的文件生成空规则集。
+
 ### OpenClash 配置生成流程
 
 ```
