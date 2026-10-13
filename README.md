@@ -17,7 +17,7 @@
 - **远程规则同步**：按规则集中使用到的 `geosite:` / `geoip:` 下载对应 JSON
 - GitHub token 支持：通过前端配置或 Docker 环境变量 `GITHUB_TOKEN` 配置
 - Docker 部署：内置端口 `9044`
-- 模板生成器配置段与 DNS 下发使用 PyYAML 解析，Docker 构建时自动安装
+- 模板解析、完整配置校验与 DNS 下发使用 PyYAML，Docker 构建时自动安装
 
 ## 目录结构
 
@@ -134,6 +134,8 @@ python app.py
 | `providers[].use_for_latency` | 是否让该机场组自动选择延迟最低节点，默认 `false` |
 | `providers[].override.additional-prefix` | 节点名前缀 |
 
+生成时会严格读取并校验订阅配置；JSON 损坏、文件无法读取或订阅字段格式无效时明确报错，保留已有完整输出。文件不存在仍视为空订阅，旧的 `default_user_agent` 字段继续兼容。
+
 ### `mapping/config/config.json`
 
 除远程规则源与定时任务外，此文件还保存全部测速组共用的参数：
@@ -222,6 +224,8 @@ AI 国家组和家宽组共用 `mapping/config/country_filter.json`，默认包�
 
 `rule_mapping` 的键和值须为非空字符串，`custom_rules` 须为非空字符串组成的数组；省略或留空的字段视为空配置。生成器配置段格式无效时，生成报错并保留已有输出。此解析需要 PyYAML，旧环境可执行 `python -m pip install -r requirements.txt` 安装，Docker 镜像缺少依赖时需重新构建。
 
+生成的规则、机场名称、User-Agent 等值会进行 YAML 转义，保留引号、反斜杠、`#` 和冒号等字符。无论是否启用 DNS 下发，完整配置写入前都会检查 YAML 格式、残留生成器占位符及规则列表类型；校验失败保留旧文件。此检查不代替 Mihomo 内核对配置语义的校验。
+
 ```yaml
 rule_mapping:
   Direct: 🌐 本机·本地直连   # 固定路由
@@ -231,6 +235,8 @@ rule_mapping:
 ```
 
 ## 生成逻辑
+
+查看或生成规则时，只有规则顺序实际变化才保存 `order.json`，顺序不变时保留原文件和修改时间；已有的逐行格式和 JSON 顺序文件继续兼容。
 
 ### ASN 规则（仅 OpenClash）
 
@@ -251,14 +257,17 @@ rule_mapping:
         │
         ▼
 generate_all_openclash_rules()
-  ├── 规则合并：X.txt + XIP.txt → X（自动合并 IP 规则）
-  └── 调用 generate_full_openclash_config()
+  ├── 一次读取规则文件，保存本次生成的内容快照
+  ├── 规则合并：X.txt + XIP.txt → X，每个合并后的规则集转换一次
+  └── 调用 generate_full_openclash_config()，传入快照及转换结果
         ├── 读取 template.yaml → base settings + proxy-groups + rule_mapping
         ├── 读取 subscribe.json → proxy-providers
         ├── 替换占位符（__ALLNODES__ 等）
-        ├── 生成内联 rules（从 mapping/rules/*.txt + rule_mapping）
+        ├── 复用转换结果，按 rule_mapping 追加策略组并生成内联 rules
         └── 写入 mapping/rule-set/openclash/openclash.yaml（完整配置）
 ```
+
+规则校验和完整配置输出使用同一份规则内容。快照读取后对规则文件的修改、增删在下一次生成生效；配套 IP 规则、`no-resolve`、模板映射及自定义规则的原有顺序保持一致。
 
 ### 输出说明
 

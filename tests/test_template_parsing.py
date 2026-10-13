@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -125,6 +126,203 @@ custom_rules:
         self.assertFalse(result["ok"])
         self.assertIn("YAML", result["full_config"]["error"])
         self.assertEqual(output.read_text(encoding="utf-8"), "previous full configuration")
+
+    def test_special_targets_round_trip_in_complete_rules(self):
+        for target in ["AI #1: preferred", "AI: preferred", "中文's 组", r"AI\primary"]:
+            with self.subTest(target=target):
+                preamble = yaml.safe_dump({"proxy-groups": [
+                    {"name": target, "type": "select", "proxies": ["DIRECT"]},
+                ]}, allow_unicode=True, sort_keys=False)
+                manual = f"DOMAIN,manual.example,{target}"
+                match = f"MATCH,{target}"
+                self.write_template(yaml.safe_dump({"rule_mapping": {"Direct": target},
+                                                    "custom_rules": [manual, match]}, allow_unicode=True), preamble)
+                result = app.generate_all_openclash_rules()
+                self.assertTrue(result["ok"], result)
+                generated = yaml.safe_load((app.OPENCLASH_DIR / app.OPENCLASH_ALL_FILENAME).read_text(encoding="utf-8"))
+                self.assertEqual(generated["rules"], [manual, f"DOMAIN-SUFFIX,example.com,{target}", match])
+
+    def test_invalid_preamble_or_unexpanded_markers_preserve_output_without_dns(self):
+        for preamble in ["proxy-groups: [unterminated\n",
+                         "proxy-groups:\n  - name: Proxy\n    type: select\n    use:\n      __ALLNODES__\n",
+                         "- scalar root\n"]:
+            with self.subTest(preamble=preamble):
+                self.write_template("rule_mapping: {Direct: DIRECT}\ncustom_rules: ['MATCH,DIRECT']\n", preamble)
+                output = app.OPENCLASH_DIR / app.OPENCLASH_ALL_FILENAME
+                output.write_text("previous full configuration", encoding="utf-8")
+                result = app.generate_all_openclash_rules()
+                self.assertFalse(result["ok"])
+                self.assertIsNone(result["combined_output"])
+                self.assertEqual(output.read_text(encoding="utf-8"), "previous full configuration")
+
+    def test_valid_yaml_with_mapping_instead_of_rule_string_is_rejected(self):
+        content = "rules:\n  - DOMAIN,example.com,AI: preferred\n"
+        self.assertIsInstance(yaml.safe_load(content)["rules"][0], dict)
+        with self.assertRaisesRegex(ValueError, "rules"):
+            app.validate_generated_openclash_config(content)
+
+    def test_invalid_subscription_file_preserves_existing_output(self):
+        self.write_template("rule_mapping: {Direct: DIRECT}\ncustom_rules: ['MATCH,DIRECT']\n")
+        invalid = [b"{", b"\xff", b"[]", b'{"providers": {}}',
+                   b'{"providers": [{"name":"Airport","url":"https://example.test/sub","use_for_dns":"false"}]}']
+        for content in invalid:
+            with self.subTest(content=content):
+                app.SUBSCRIBE_PATH.write_bytes(content)
+                output = app.OPENCLASH_DIR / app.OPENCLASH_ALL_FILENAME
+                output.write_text("previous full configuration", encoding="utf-8")
+                result = app.generate_all_openclash_rules()
+                self.assertFalse(result["ok"])
+                self.assertIn("subscribe.json", result["full_config"]["error"])
+                self.assertEqual(output.read_text(encoding="utf-8"), "previous full configuration")
+
+    def test_unreadable_subscription_reports_error_and_preserves_output(self):
+        self.write_template("rule_mapping: {Direct: DIRECT}\ncustom_rules: []\n")
+        output = app.OPENCLASH_DIR / app.OPENCLASH_ALL_FILENAME
+        output.write_text("previous full configuration", encoding="utf-8")
+        original_read = Path.read_text
+
+        def read(path, *args, **kwargs):
+            if path == app.SUBSCRIBE_PATH:
+                raise PermissionError("Access denied")
+            return original_read(path, *args, **kwargs)
+
+        with patch.object(Path, "read_text", read):
+            result = app.generate_all_openclash_rules()
+        self.assertFalse(result["ok"])
+        self.assertIn("subscribe.json", result["full_config"]["error"])
+        self.assertEqual(output.read_text(encoding="utf-8"), "previous full configuration")
+
+    def test_missing_subscription_keeps_empty_default_and_legacy_ua_is_preserved(self):
+        app.SUBSCRIBE_PATH.unlink()
+        self.assertEqual(app.load_subscribe_config(), ([], None))
+        app.SUBSCRIBE_PATH.write_text(json.dumps({"providers": [], "default_user_agent": "Legacy-UA"}), encoding="utf-8-sig")
+        self.assertEqual(app.load_subscribe_config(), ([], "Legacy-UA"))
+
+    def test_generated_provider_strings_round_trip(self):
+        ua = 'Client "Desktop"\\Build'
+        provider = {"name": "false", "url": "https://example.test/sub", "use_for_ai": False,
+                    "override": {"udp": True, "additional-prefix": 'Home "ISP"'}}
+        app.SUBSCRIBE_PATH.write_text(json.dumps({"providers": [provider], "user_agent": ua}), encoding="utf-8")
+        self.write_template("rule_mapping: {Direct: DIRECT}\ncustom_rules: ['MATCH,DIRECT']\n",
+                            "__PROXY_PROVIDERS__\nproxy-groups:\n  __PROVIDER_GROUPS__\n"
+                            "  - name: SELECTOR\n    type: select\n    use:\n      __ALLNODES__\n")
+        result = app.generate_all_openclash_rules()
+        self.assertTrue(result["ok"], result)
+        generated = yaml.safe_load((app.OPENCLASH_DIR / app.OPENCLASH_ALL_FILENAME).read_text(encoding="utf-8"))
+        self.assertEqual(generated["proxy-providers"]["false"]["header"]["User-Agent"], [ua])
+        self.assertEqual(generated["proxy-providers"]["false"]["override"], provider["override"])
+        self.assertEqual([group["name"] for group in generated["proxy-groups"]], ["false", "SELECTOR"])
+        self.assertEqual(generated["proxy-groups"][1]["use"], ["false"])
+
+    def test_rule_order_written_only_when_it_changes(self):
+        app.list_rules()
+        original = app.ORDER_PATH.read_bytes()
+        stat = app.ORDER_PATH.stat()
+        with patch.object(app, "write_text_file_atomic", wraps=app.write_text_file_atomic) as write:
+            app.list_rules()
+            app.list_rules()
+            app.save_rule_order(["Direct.txt"])
+            write.assert_not_called()
+        self.assertEqual(app.ORDER_PATH.read_bytes(), original)
+        self.assertEqual(app.ORDER_PATH.stat().st_mtime_ns, stat.st_mtime_ns)
+        (app.RULES_DIR / "AI.txt").write_text("keyword:openai\n", encoding="utf-8")
+        with patch.object(app, "write_text_file_atomic", wraps=app.write_text_file_atomic) as write:
+            app.list_rules()
+            app.list_rules()
+            self.assertEqual(write.call_count, 1)
+        self.assertEqual(app.read_rule_order(), ["Direct.txt", "AI.txt"])
+        with patch.object(app, "write_text_file_atomic", wraps=app.write_text_file_atomic) as write:
+            app.update_rule_order(["AI.txt", "Direct.txt"])
+            app.list_rules()
+            self.assertEqual(write.call_count, 1)
+        self.assertEqual(app.read_rule_order(), ["AI.txt", "Direct.txt"])
+
+    def test_unchanged_legacy_or_compact_order_is_not_rewritten(self):
+        for content in ['["Direct.txt"]', "# rule order\nDirect.txt\n"]:
+            with self.subTest(content=content):
+                app.ORDER_PATH.write_text(content, encoding="utf-8")
+                with patch.object(app, "write_text_file_atomic") as write:
+                    app.list_rules()
+                    write.assert_not_called()
+                self.assertEqual(app.ORDER_PATH.read_text(encoding="utf-8"), content)
+
+    def test_batch_reuses_one_snapshot_and_one_conversion_per_merged_rule_set(self):
+        self.write_template("rule_mapping: {AI: Proxy, Direct: DIRECT}\ncustom_rules: ['DST-PORT,53,DIRECT', 'MATCH,DIRECT']\n")
+        (app.RULES_DIR / "DirectIP.txt").write_text("198.51.100.0/24\ngeoip:cn\n", encoding="utf-8")
+        (app.RULES_DIR / "AI.txt").write_text("keyword:openai\n", encoding="utf-8")
+        (app.RULES_DIR / "AIIP.txt").write_text("ipasn:AS399358\n2001:db8::/32\n", encoding="utf-8")
+        app.PORTS_PATH.write_text('{"direct_ports": ["5000-5010"]}', encoding="utf-8")
+        reads = {}
+        original_read = Path.read_text
+
+        def read(path, *args, **kwargs):
+            if path.parent == app.RULES_DIR:
+                reads[path.name] = reads.get(path.name, 0) + 1
+            return original_read(path, *args, **kwargs)
+
+        with patch.object(Path, "read_text", read), \
+             patch.object(app, "list_rules", wraps=app.list_rules) as listing, \
+             patch.object(app, "convert_to_openclash_yaml", wraps=app.convert_to_openclash_yaml) as convert:
+            result = app.generate_all_openclash_rules()
+        self.assertTrue(result["ok"], result)
+        listing.assert_called_once_with()
+        self.assertEqual(convert.call_count, 2)
+        self.assertEqual(reads, {"Direct.txt": 1, "DirectIP.txt": 1, "AI.txt": 1, "AIIP.txt": 1})
+        generated = yaml.safe_load((app.OPENCLASH_DIR / app.OPENCLASH_ALL_FILENAME).read_text(encoding="utf-8"))
+        self.assertEqual(generated["rules"], [
+            "DST-PORT,53,DIRECT", "DST-PORT,5000-5010,Direct", "DOMAIN-KEYWORD,openai,Proxy",
+            "IP-ASN,399358,Proxy", "IP-CIDR6,2001:db8::/32,Proxy,no-resolve",
+            "DOMAIN-SUFFIX,example.com,DIRECT", "IP-CIDR,198.51.100.0/24,DIRECT,no-resolve",
+            "GEOIP,CN,DIRECT,no-resolve", "MATCH,DIRECT",
+        ])
+        merged = {item["rule"]["name"]: item.get("merged_into") for item in result["results"]}
+        self.assertEqual(merged["AIIP"], "AI")
+        self.assertEqual(merged["DirectIP"], "Direct")
+
+    def test_rule_changes_after_conversion_do_not_change_the_current_output(self):
+        self.write_template("rule_mapping: {Direct: DIRECT}\ncustom_rules: ['MATCH,DIRECT']\n")
+        ip_path = app.RULES_DIR / "DirectIP.txt"
+        ip_path.write_text("198.51.100.0/24\n", encoding="utf-8")
+        original_convert = app.convert_to_openclash_yaml
+
+        def convert(lines, *args, **kwargs):
+            converted = original_convert(lines, *args, **kwargs)
+            (app.RULES_DIR / "Direct.txt").write_text("ipasn:ASinvalid\n", encoding="utf-8")
+            ip_path.write_text("203.0.113.0/24\n", encoding="utf-8")
+            (app.RULES_DIR / "Later.txt").write_text("keyword:later\n", encoding="utf-8")
+            return converted
+
+        with patch.object(app, "convert_to_openclash_yaml", side_effect=convert) as converter:
+            result = app.generate_all_openclash_rules()
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(converter.call_count, 1)
+        self.assertEqual(result["total"], 2)
+        generated = yaml.safe_load((app.OPENCLASH_DIR / app.OPENCLASH_ALL_FILENAME).read_text(encoding="utf-8"))
+        self.assertEqual(generated["rules"], ["DOMAIN-SUFFIX,example.com,DIRECT",
+                                             "IP-CIDR,198.51.100.0/24,DIRECT,no-resolve", "MATCH,DIRECT"])
+
+    def test_standalone_complete_generation_uses_snapshot_without_reloading_files(self):
+        self.write_template("rule_mapping: {Direct: DIRECT}\ncustom_rules: ['MATCH,DIRECT']\n")
+        (app.RULES_DIR / "DirectIP.txt").write_text("198.51.100.0/24\n", encoding="utf-8")
+        with patch.object(app, "list_rules", wraps=app.list_rules) as listing, \
+             patch.object(app, "load_rule_lines_with_merged_ip") as reload:
+            result = app.generate_full_openclash_config()
+        self.assertTrue(result["ok"], result)
+        listing.assert_called_once_with()
+        reload.assert_not_called()
+        generated = yaml.safe_load((app.OPENCLASH_DIR / app.OPENCLASH_ALL_FILENAME).read_text(encoding="utf-8"))
+        self.assertIn("IP-CIDR,198.51.100.0/24,DIRECT,no-resolve", generated["rules"])
+
+    def test_rule_only_fallback_preserves_targets_without_a_template(self):
+        app.TEMPLATE_PATH.unlink(missing_ok=True)
+        (app.RULES_DIR / "DirectIP.txt").write_text("198.51.100.0/24\n", encoding="utf-8")
+        with patch.object(app, "convert_to_openclash_yaml", wraps=app.convert_to_openclash_yaml) as convert:
+            result = app.generate_all_openclash_rules()
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(convert.call_count, 1)
+        generated = yaml.safe_load((app.OPENCLASH_DIR / app.OPENCLASH_ALL_FILENAME).read_text(encoding="utf-8"))
+        self.assertEqual(generated["payload"], ["DOMAIN-SUFFIX,example.com,Direct",
+                                               "IP-CIDR,198.51.100.0/24,Direct,no-resolve"])
 
 
 if __name__ == "__main__":
