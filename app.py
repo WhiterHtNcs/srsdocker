@@ -1853,11 +1853,10 @@ def download_provider_subscription(provider, global_user_agent=None):
 
 
 def get_yaml_module():
-    # Existing installations can continue to generate without DNS adaptation.
     try:
         import yaml
     except ImportError as error:
-        raise ValueError("DNS 下发需要 PyYAML，请重新构建 Docker 镜像或安装 requirements.txt。") from error
+        raise ValueError("配置解析需要 PyYAML，请重新构建 Docker 镜像或安装 requirements.txt。") from error
     return yaml
 
 
@@ -2316,38 +2315,35 @@ def read_template():
     preamble = text[:marker_idx].rstrip()
     generator_text = text[marker_idx:]
 
-    rule_mapping = {}
-    custom_rules = []
-    current_section = None
+    # The preamble contains placeholders that are not valid YAML until expanded.
+    # Parse only the generator section so YAML handles comments and quoting.
+    yaml = get_yaml_module()
+    try:
+        sections = yaml.safe_load(generator_text)
+    except yaml.YAMLError as error:
+        raise ValueError("Template generator sections are not valid YAML.") from error
+    if sections is None:
+        sections = {}
+    if not isinstance(sections, dict):
+        raise ValueError("Template generator sections must be a YAML mapping.")
 
-    for raw_line in generator_text.splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#") or line.startswith("#"):
-            continue
+    rule_mapping = sections.get("rule_mapping")
+    if rule_mapping is None:
+        rule_mapping = {}
+    if not isinstance(rule_mapping, dict) or any(
+        not isinstance(name, str) or not name.strip()
+        or not isinstance(target, str) or not target.strip()
+        for name, target in rule_mapping.items()
+    ):
+        raise ValueError("rule_mapping must map non-empty rule names to non-empty proxy group names.")
 
-        # Detect section switches (top-level keys at column 0)
-        if line == "rule_mapping:":
-            current_section = "rule_mapping"
-            continue
-        if line == "custom_rules:":
-            current_section = "custom_rules"
-            continue
-
-        # Skip sub-keys of sections we don't parse
-        if current_section is None:
-            continue
-
-        # A line back at column 0 means a new section started
-        if not raw_line.startswith(" ") and raw_line.strip():
-            current_section = None
-            continue
-
-        if current_section == "rule_mapping" and ":" in line:
-            key, _, value = line.partition(":")
-            rule_mapping[key.strip()] = value.strip().strip('"').strip("'")
-
-        elif current_section == "custom_rules" and line.startswith("- "):
-            custom_rules.append(line[2:].strip().strip('"').strip("'"))
+    custom_rules = sections.get("custom_rules")
+    if custom_rules is None:
+        custom_rules = []
+    if not isinstance(custom_rules, list) or any(
+        not isinstance(rule, str) or not rule.strip() for rule in custom_rules
+    ):
+        raise ValueError("custom_rules must be a list of non-empty strings.")
 
     return {
         "preamble": preamble,

@@ -17,7 +17,7 @@
 - **远程规则同步**：按规则集中使用到的 `geosite:` / `geoip:` 下载对应 JSON
 - GitHub token 支持：通过前端配置或 Docker 环境变量 `GITHUB_TOKEN` 配置
 - Docker 部署：内置端口 `9044`
-- DNS 下发使用 PyYAML 解析订阅配置，Docker 构建时自动安装
+- 模板生成器配置段与 DNS 下发使用 PyYAML 解析，Docker 构建时自动安装
 
 ## 目录结构
 
@@ -217,6 +217,10 @@ AI 国家组和家宽组共用 `mapping/config/country_filter.json`，默认包�
 在线配置不可用且本地文件不存在或无效、同一节点域名对应不同 DNS、与模板已有同域名策略冲突时，完整配置生成会报错并保留原输出。策略按域名匹配，无法区分共用同一服务器域名的不同机场。节点或 DNS 更新后需重新生成并加载完整配置；客户端仅更新代理订阅不会更新这部分策略。DNS 下发需要 PyYAML 依赖，尚未安装依赖的旧 Docker 镜像需重新构建；本次本地回退及关键词配置更新只需同步代码后重启。
 
 #### rule_mapping 说明
+
+`rule_mapping` 和 `custom_rules` 须放在模板的 `# ===== Generator-Only Sections =====` 分隔行之后。该部分按 YAML 解析，支持行尾注释和带引号的字符串：注释不会进入策略名称，引号内的 `#`、冒号等字符会保留。模板前半段及其占位符仍按原文保留。
+
+`rule_mapping` 的键和值须为非空字符串，`custom_rules` 须为非空字符串组成的数组；省略或留空的字段视为空配置。生成器配置段格式无效时，生成报错并保留已有输出。此解析需要 PyYAML，旧环境可执行 `python -m pip install -r requirements.txt` 安装，Docker 镜像缺少依赖时需重新构建。
 
 ```yaml
 rule_mapping:

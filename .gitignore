@@ -5,6 +5,9 @@ template.yaml
 ports.json
 order.json
 
+# Local deployment script
+/docker/srs_rules.sh
+
 # All data
 mapping/
 rules/
