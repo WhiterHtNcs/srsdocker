@@ -161,6 +161,93 @@ custom_rules:
         with self.assertRaisesRegex(ValueError, "rules"):
             app.validate_generated_openclash_config(content)
 
+    def test_unknown_rule_targets_preserve_previous_full_configuration(self):
+        cases = [
+            {"rule_mapping": {"Direct": "MissingGroup"}, "custom_rules": []},
+            {"rule_mapping": {"Direct": "DIRECT"},
+             "custom_rules": ["DOMAIN,custom.example,MissingGroup"]},
+            {"rule_mapping": {"Direct": "DIRECT"}, "custom_rules": ["MATCH,MissingGroup"]},
+        ]
+        output = app.OPENCLASH_DIR / app.OPENCLASH_ALL_FILENAME
+        for sections in cases:
+            with self.subTest(sections=sections):
+                self.write_template(yaml.safe_dump(sections))
+                output.write_text("previous full configuration", encoding="utf-8")
+                result = app.generate_all_openclash_rules()
+                self.assertFalse(result["ok"])
+                self.assertIn("MissingGroup", result["full_config"]["error"])
+                self.assertIsNone(result["combined_output"])
+                self.assertEqual(output.read_text(encoding="utf-8"), "previous full configuration")
+
+    def test_duplicate_generated_airport_group_preserves_previous_full_configuration(self):
+        app.SUBSCRIBE_PATH.write_text(json.dumps({"providers": [
+            {"name": "Proxy", "url": "https://example.test/sub", "use_for_ai": False},
+        ]}), encoding="utf-8")
+        self.write_template("rule_mapping: {Direct: DIRECT}\ncustom_rules: ['MATCH,DIRECT']\n",
+                            PREAMBLE + "  __PROVIDER_GROUPS__\n")
+        output = app.OPENCLASH_DIR / app.OPENCLASH_ALL_FILENAME
+        output.write_text("previous full configuration", encoding="utf-8")
+        result = app.generate_all_openclash_rules()
+        self.assertFalse(result["ok"])
+        self.assertIn("Proxy", result["full_config"]["error"])
+        self.assertIsNone(result["combined_output"])
+        self.assertEqual(output.read_text(encoding="utf-8"), "previous full configuration")
+
+    def test_duplicate_groups_nodes_and_builtin_names_are_rejected(self):
+        group = {"name": "Proxy", "type": "select", "proxies": ["DIRECT"]}
+        node = {"name": "Proxy", "type": "direct"}
+        cases = [
+            {"proxy-groups": [group, group]},
+            {"proxy-groups": [group], "proxies": [node]},
+            {"proxies": [node, node]},
+            *({"proxy-groups": [{**group, "name": name}]} for name in
+              ["DIRECT", "REJECT", "REJECT-DROP", "COMPATIBLE", "PASS", "PASS-RULE"]),
+        ]
+        for config in cases:
+            with self.subTest(config=config):
+                with self.assertRaisesRegex(ValueError, "重复"):
+                    app.validate_generated_openclash_config(yaml.safe_dump(config))
+
+    def test_rule_reference_validation_accepts_builtins_nodes_and_complex_payloads(self):
+        config = {
+            "proxies": [{"name": "LocalProxy", "type": "direct"}],
+            "proxy-groups": [{"name": "Proxy", "type": "select", "proxies": ["LocalProxy"]}],
+            "rules": [
+                "DOMAIN,example.com,LocalProxy",
+                "IP-CIDR,198.51.100.0/24,Proxy,no-resolve",
+                "IP-ASN,399358,Proxy,src,no-resolve",
+                "AND,((DOMAIN,example.com),(NETWORK,UDP)),Proxy",
+                "OR,((DOMAIN,example.com),(NETWORK,UDP)),Proxy",
+                "NOT,((NETWORK,UDP)),Proxy",
+                r"DOMAIN-REGEX,^test{1,3}\.example$,Proxy",
+                r"PROCESS-NAME-REGEX,^client{1,3}\.exe$,Proxy",
+                r"PROCESS-PATH-REGEX,^/opt/client{1,3}$,Proxy",
+                " domain , example.com , Proxy ",
+                *[f"MATCH,{name}" for name in
+                  ["DIRECT", "REJECT", "REJECT-DROP", "COMPATIBLE", "PASS", "PASS-RULE", "GLOBAL"]],
+            ],
+        }
+        app.validate_generated_openclash_config(yaml.safe_dump(config))
+        for rule in ["IP-CIDR,198.51.100.0/24,MissingGroup,no-resolve",
+                     "AND,((DOMAIN,example.com),(NETWORK,UDP)),MissingGroup",
+                     r"DOMAIN-REGEX,^test{1,3}\.example$,MissingGroup"]:
+            with self.subTest(rule=rule):
+                config["rules"] = [rule]
+                with self.assertRaisesRegex(ValueError, "MissingGroup"):
+                    app.validate_generated_openclash_config(yaml.safe_dump(config))
+
+    def test_sub_rule_targets_use_the_sub_rule_namespace(self):
+        config = {"sub-rules": {"AI": ["MATCH,DIRECT"]},
+                  "rules": ["SUB-RULE,(NETWORK,TCP),AI", "MATCH,GLOBAL"]}
+        app.validate_generated_openclash_config(yaml.safe_dump(config))
+        config["rules"][0] = "SUB-RULE,(NETWORK,TCP),MissingSubRule"
+        with self.assertRaisesRegex(ValueError, "MissingSubRule"):
+            app.validate_generated_openclash_config(yaml.safe_dump(config))
+        config["rules"][0] = "SUB-RULE,(NETWORK,TCP),AI"
+        config["sub-rules"]["AI"] = ["MATCH,MissingGroup"]
+        with self.assertRaisesRegex(ValueError, "MissingGroup"):
+            app.validate_generated_openclash_config(yaml.safe_dump(config))
+
     def test_invalid_subscription_file_preserves_existing_output(self):
         self.write_template("rule_mapping: {Direct: DIRECT}\ncustom_rules: ['MATCH,DIRECT']\n")
         invalid = [b"{", b"\xff", b"[]", b'{"providers": {}}',
@@ -247,7 +334,8 @@ custom_rules:
                 self.assertEqual(app.ORDER_PATH.read_text(encoding="utf-8"), content)
 
     def test_batch_reuses_one_snapshot_and_one_conversion_per_merged_rule_set(self):
-        self.write_template("rule_mapping: {AI: Proxy, Direct: DIRECT}\ncustom_rules: ['DST-PORT,53,DIRECT', 'MATCH,DIRECT']\n")
+        self.write_template("rule_mapping: {AI: Proxy, Direct: DIRECT}\ncustom_rules: ['DST-PORT,53,DIRECT', 'MATCH,DIRECT']\n",
+                            PREAMBLE + "  - name: Direct\n    type: select\n    proxies: [DIRECT]\n")
         (app.RULES_DIR / "DirectIP.txt").write_text("198.51.100.0/24\ngeoip:cn\n", encoding="utf-8")
         (app.RULES_DIR / "AI.txt").write_text("keyword:openai\n", encoding="utf-8")
         (app.RULES_DIR / "AIIP.txt").write_text("ipasn:AS399358\n2001:db8::/32\n", encoding="utf-8")

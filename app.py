@@ -2453,6 +2453,63 @@ def validate_generated_openclash_config(content):
     if rules is not None and (not isinstance(rules, list) or any(not isinstance(rule, str) for rule in rules)):
         raise ValueError("生成配置的 rules 必须是字符串数组。")
 
+    # Inline nodes and groups share a namespace with Mihomo's built-in policies.
+    proxy_names = {"DIRECT", "REJECT", "REJECT-DROP", "COMPATIBLE", "PASS", "PASS-RULE"}
+    for section in ("proxies", "proxy-groups"):
+        definitions = config.get(section)
+        if definitions is None:
+            continue
+        if not isinstance(definitions, list):
+            raise ValueError(f"生成配置的 {section} 必须是数组。")
+        for index, definition in enumerate(definitions):
+            name = definition.get("name") if isinstance(definition, dict) else None
+            if not isinstance(name, str) or not name:
+                raise ValueError(f"生成配置的 {section}[{index}] 必须包含非空字符串 name。")
+            if name in proxy_names:
+                raise ValueError(
+                    f"生成配置的策略组或节点名称「{name}」重复（{section}[{index}]），"
+                    "请修改机场名或模板中的名称。"
+                )
+            proxy_names.add(name)
+    # The core adds GLOBAL when the template does not define it explicitly.
+    proxy_names.add("GLOBAL")
+
+    sub_rules = config.get("sub-rules")
+    if sub_rules is None:
+        sub_rules = {}
+    if not isinstance(sub_rules, dict):
+        raise ValueError("生成配置的 sub-rules 必须是映射。")
+    rule_sections = {"rules": rules if rules is not None else []}
+    rule_sections.update((f"sub-rules[{name}]", items) for name, items in sub_rules.items())
+    for section, items in rule_sections.items():
+        if not isinstance(items, list) or any(not isinstance(rule, str) for rule in items):
+            raise ValueError(f"生成配置的 {section} 必须是字符串数组。")
+        for index, rule in enumerate(items):
+            # Match Mihomo's ParseRulePayload: regular rules have a third-field
+            # target; regex/logical rules allow commas in their payload and use
+            # the final field, while MATCH has no payload.
+            fields = [field.strip(" ") for field in rule.split(",")]
+            rule_type = fields[0].upper()
+            target = ""
+            if rule_type == "MATCH" and len(fields) >= 2:
+                target = fields[1]
+            elif len(fields) >= 3:
+                if rule_type in {"NOT", "OR", "AND", "SUB-RULE", "DOMAIN-REGEX",
+                                 "PROCESS-NAME-REGEX", "PROCESS-PATH-REGEX"}:
+                    target = fields[-1]
+                else:
+                    target = fields[2]
+            if not target:
+                raise ValueError(f"生成配置的 {section}[{index}] 缺少规则目标。")
+            if rule_type == "SUB-RULE":
+                if target not in sub_rules:
+                    raise ValueError(f"生成配置的 {section}[{index}] 引用了不存在的子规则「{target}」。")
+            elif target not in proxy_names:
+                raise ValueError(
+                    f"生成配置的 {section}[{index}] 引用了不存在的策略组或节点「{target}」，"
+                    "请检查 rule_mapping 和 custom_rules。"
+                )
+
 
 def generate_full_openclash_config(rules_list=None, converted_rules=None):
     """Generate full OpenClash configuration YAML.
@@ -2964,6 +3021,9 @@ class AppHandler(SimpleHTTPRequestHandler):
         raw_body = self.rfile.read(length) if length > 0 else b"{}"
         try:
             payload = json.loads(raw_body.decode("utf-8"))
+        except UnicodeDecodeError:
+            self.send_json({"error": "JSON body must use valid UTF-8."}, status=HTTPStatus.BAD_REQUEST)
+            return None
         except json.JSONDecodeError:
             self.send_json({"error": "Invalid JSON body"}, status=HTTPStatus.BAD_REQUEST)
             return None
