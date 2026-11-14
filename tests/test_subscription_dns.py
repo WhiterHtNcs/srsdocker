@@ -317,15 +317,17 @@ class SubscriptionDnsTests(unittest.TestCase):
         app.ensure_residential_filter_file()
         self.assertEqual(json.loads(app.RESIDENTIAL_FILTER_PATH.read_text(encoding="utf-8")), custom)
 
-    def test_residential_keywords_reload_and_country_scope_is_preserved(self):
+    def test_residential_keywords_reload_without_country_restrictions(self):
         default = re.compile(app.get_residential_node_filter())
-        self.assertIsNotNone(default.search("SG 新加坡 家宽"))
+        for node in ["SG 新加坡 家宽", "香港 家宽", "家宽", "未知地区 家宽"]:
+            self.assertIsNotNone(default.search(node), node)
         self.assertIsNone(default.search("US 美国 Residential"))
         app.RESIDENTIAL_FILTER_PATH.write_text(json.dumps({"keywords": ["家寬", "Residential"]}), encoding="utf-8")
         current = re.compile(app.get_residential_node_filter())
-        for node in ["US 美国 residential 01", "Residential JP 日本 02", "台湾 家寬", "新加坡 家寬"]:
+        for node in ["US 美国 residential 01", "Residential JP 日本 02", "台湾 家寬", "新加坡 家寬",
+                     "香港 家寬", "英国 Residential", "Residential", "未知地区 家寬"]:
             self.assertIsNotNone(current.search(node), node)
-        for node in ["香港 家寬", "英国 Residential", "US 美国 普通线路", "台湾 家宽"]:
+        for node in ["US 美国 普通线路", "台湾 家宽"]:
             self.assertIsNone(current.search(node), node)
         self.assertEqual(set(json.loads(app.RESIDENTIAL_FILTER_PATH.read_text(encoding="utf-8"))), {"keywords"})
 
@@ -370,7 +372,7 @@ class SubscriptionDnsTests(unittest.TestCase):
         self.assertEqual(app.COUNTRY_FILTER_PATH.read_bytes(), original)
         self.assertEqual([name for name, _ in app.get_country_node_filters()], ["加拿大"])
 
-    def test_ai_and_residential_share_country_selection_filters_and_order(self):
+    def test_country_selection_only_changes_ai_groups(self):
         self.use_country_template()
         self.providers = [
             {**self.providers[0], "use_for_ai": True, "use_for_residential": True},
@@ -398,19 +400,20 @@ class SubscriptionDnsTests(unittest.TestCase):
         self.assertEqual(home["use"], ["Airport A"])
         self.assertNotIn("Airport B·家宽", by_name)
         pattern = re.compile(home["filter"])
-        for node in ["ca 家宽", "家宽 加拿大", "SG 家宽", "家宽 新加坡"]:
+        for node in ["ca 家宽", "家宽 加拿大", "SG 家宽", "家宽 新加坡", "US 家宽",
+                     "日本 家宽", "家宽 香港", "家宽"]:
             self.assertIsNotNone(pattern.search(node), node)
-        for node in ["US 家宽", "日本 家宽", "CA 普通", "家宽 香港"]:
-            self.assertIsNone(pattern.search(node), node)
+        self.assertIsNone(pattern.search("CA 普通"))
 
         self.save_countries([{"name": "日本", "enabled": True, "filter": r"(?i)(日本|\bJP\b)"}])
         self.assertTrue(app.generate_full_openclash_config()["ok"])
         updated = {group["name"]: group for group in self.read_generated()["proxy-groups"]}
         self.assertEqual(updated["AI"]["proxies"], ["Airport A·家宽", "Airport A·日本", "Airport B·日本", "DIRECT"])
-        self.assertIsNone(re.search(updated["Airport A·家宽"]["filter"], "CA 家宽"))
+        self.assertEqual(updated["Airport A·家宽"]["filter"], home["filter"])
+        self.assertIsNotNone(re.search(updated["Airport A·家宽"]["filter"], "CA 家宽"))
         self.assertIsNotNone(re.search(updated["Airport A·家宽"]["filter"], "JP 家宽"))
 
-    def test_empty_or_disabled_countries_leave_no_groups_or_dangling_references(self):
+    def test_empty_or_disabled_countries_keep_residential_groups_and_references(self):
         self.use_country_template()
         self.providers[0].update(use_for_ai=True, use_for_residential=True)
         self.save_providers()
@@ -420,20 +423,20 @@ class SubscriptionDnsTests(unittest.TestCase):
                 result = app.generate_full_openclash_config()
                 self.assertTrue(result["ok"], result)
                 groups = self.read_generated()["proxy-groups"]
-                self.assertEqual([group["name"] for group in groups], ["SELECTOR", "Airport A", "AI"])
-                self.assertEqual(groups[-1]["proxies"], ["DIRECT"])
-                self.assertIsNone(re.search(app.get_residential_node_filter(), "US 家宽"))
+                self.assertEqual([group["name"] for group in groups], ["SELECTOR", "Airport A", "Airport A·家宽", "AI"])
+                self.assertEqual(groups[-1]["proxies"], ["Airport A·家宽", "DIRECT"])
+                self.assertIsNotNone(re.search(groups[2]["filter"], "US 家宽"))
 
-    def test_country_yaml_quotes_and_scoped_flags_round_trip(self):
+    def test_country_yaml_quotes_and_flags_round_trip(self):
         self.save_countries([{"name": "自定义", "filter": r"(?i)(US|John's)"}])
         rendered = app.generate_provider_country_groups_yaml(self.providers, app.DEFAULT_URL_TEST_CONFIG)
         group = yaml.safe_load("proxy-groups:\n  " + rendered)["proxy-groups"][0]
         self.assertEqual(group["filter"], r"(?i)(US|John's)")
-        home = re.compile(app.get_residential_node_filter())
-        self.assertIsNotNone(home.search("john's 家宽"))
-        self.assertIsNotNone(home.search("家宽 us"))
+        pattern = re.compile(group["filter"])
+        self.assertIsNotNone(pattern.search("john's 普通线路"))
+        self.assertIsNotNone(pattern.search("普通线路 us"))
 
-    def test_country_case_rules_are_shared_while_home_keywords_ignore_case(self):
+    def test_ai_country_case_rules_do_not_limit_residential_keywords(self):
         self.save_countries([{"name": "美国", "filter": r"\bUS\b"}])
         app.RESIDENTIAL_FILTER_PATH.write_text(json.dumps({"keywords": ["Home"]}), encoding="utf-8")
         ai = re.compile(app.get_provider_country_groups(self.providers)[0][2])
@@ -443,11 +446,31 @@ class SubscriptionDnsTests(unittest.TestCase):
             self.assertIsNotNone(home.search(node))
         for node in ["us home", "HOME us"]:
             self.assertIsNone(ai.search(node))
-            self.assertIsNone(home.search(node))
+            self.assertIsNotNone(home.search(node))
+
+    def test_residential_generation_ignores_country_file_when_ai_disabled(self):
+        self.use_country_template()
+        self.providers[0]["use_for_residential"] = True
+        self.save_providers()
+        for content in [None, "invalid", '{"countries": []}',
+                        '{"countries": [{"name": "美国", "filter": "["}]}']:
+            with self.subTest(content=content):
+                if content is None:
+                    app.COUNTRY_FILTER_PATH.unlink(missing_ok=True)
+                else:
+                    app.COUNTRY_FILTER_PATH.write_text(content, encoding="utf-8")
+                with patch.object(app, "get_country_node_filters", wraps=app.get_country_node_filters) as load:
+                    result = app.generate_full_openclash_config()
+                    self.assertTrue(result["ok"], result)
+                    load.assert_not_called()
+                groups = {group["name"]: group for group in self.read_generated()["proxy-groups"]}
+                self.assertEqual(groups["AI"]["proxies"], ["Airport A·家宽", "DIRECT"])
+                self.assertEqual(groups["Airport A·家宽"]["use"], ["Airport A"])
+                self.assertIsNotNone(re.search(groups["Airport A·家宽"]["filter"], "香港 家宽"))
 
     def test_invalid_country_configs_fail_without_overwriting_existing_output(self):
         self.use_country_template()
-        self.providers[0]["use_for_ai"] = True
+        self.providers[0].update(use_for_ai=True, use_for_residential=True)
         self.save_providers()
         output = app.OPENCLASH_DIR / app.OPENCLASH_ALL_FILENAME
         invalid = ["{", "[]", '{"countries": {}}']

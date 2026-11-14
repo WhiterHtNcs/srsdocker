@@ -2126,7 +2126,7 @@ def generate_proxy_providers_yaml(providers, global_user_agent=None):
 
 
 def ensure_country_filter_file():
-    """Provision shared AI/residential country defaults without replacing edits."""
+    """Provision AI country defaults without replacing edits."""
     if not COUNTRY_FILTER_PATH.exists():
         write_text_file_atomic(
             COUNTRY_FILTER_PATH,
@@ -2209,9 +2209,7 @@ def ensure_residential_filter_file():
         )
 
 
-def get_residential_node_filter(country_filters=None):
-    if country_filters is None:
-        country_filters = get_country_node_filters()
+def get_residential_node_filter():
     ensure_residential_filter_file()
     try:
         config = json.loads(RESIDENTIAL_FILTER_PATH.read_text(encoding="utf-8-sig"))
@@ -2224,27 +2222,19 @@ def get_residential_node_filter(country_filters=None):
     ):
         raise ValueError("residential_filter.json 中 keywords 必须是非空字符串数组。")
     keywords = list(dict.fromkeys(keyword.strip() for keyword in keywords))
-    names = "(?i:" + "|".join(re.escape(keyword) for keyword in keywords) + ")"
-    if not country_filters:
-        return r"a^"  # Never allow an empty country selection to match every node.
-    countries = "(?:" + "|".join(scope_country_filter(node_filter) for _, node_filter in country_filters) + ")"
-    return rf"(?:{countries}.*{names}|{names}.*{countries})"
+    return "(?i:" + "|".join(re.escape(keyword) for keyword in keywords) + ")"
 
 
 def get_residential_providers(providers):
     return [provider for provider in providers if provider.get("use_for_residential", False)]
 
 
-def get_provider_residential_groups(providers, country_filters=None):
-    """Return one residential group per opted-in provider across enabled countries."""
+def get_provider_residential_groups(providers):
+    """Return one residential group per opted-in provider matching only keywords."""
     selected = get_residential_providers(providers)
     if not selected:
         return []
-    if country_filters is None:
-        country_filters = get_country_node_filters()
-    if not country_filters:
-        return []
-    node_filter = get_residential_node_filter(country_filters)
+    node_filter = get_residential_node_filter()
     return [(f"{provider.get('name', 'Unknown')}·家宽", provider.get("name", "Unknown"), node_filter)
             for provider in selected]
 
@@ -2279,9 +2269,9 @@ def generate_provider_country_references_yaml(providers, country_filters=None):
     return "\n".join([f"- {dump_yaml_value(names[0])}", *[f"      - {dump_yaml_value(name)}" for name in names[1:]]])
 
 
-def generate_provider_residential_groups_yaml(providers, country_filters=None):
+def generate_provider_residential_groups_yaml(providers):
     """Generate one standalone residential manual group per opted-in provider."""
-    groups = get_provider_residential_groups(providers, country_filters)
+    groups = get_provider_residential_groups(providers)
     lines = []
     for index, (group_name, provider_name, node_filter) in enumerate(groups):
         if index:
@@ -2300,9 +2290,9 @@ def generate_provider_residential_groups_yaml(providers, country_filters=None):
     return "\n".join(lines)
 
 
-def generate_residential_reference_yaml(providers, country_filters=None):
+def generate_residential_reference_yaml(providers):
     """Reference opted-in providers' residential groups directly."""
-    names = [name for name, _, _ in get_provider_residential_groups(providers, country_filters)]
+    names = [name for name, _, _ in get_provider_residential_groups(providers)]
     if not names:
         return ""
     return "\n".join([f"- {dump_yaml_value(names[0])}", *[f"      - {dump_yaml_value(name)}" for name in names[1:]]])
@@ -2558,7 +2548,7 @@ def generate_full_openclash_config(rules_list=None, converted_rules=None):
     ai_providers = get_ai_providers(providers)
     preamble = template["preamble"]
     try:
-        country_filters = get_country_node_filters() if ai_providers or get_residential_providers(providers) else []
+        country_filters = get_country_node_filters() if ai_providers else []
     except (ValueError, OSError) as error:
         return {"ok": False, "error": str(error)}
     if provider_names and "__PROVIDER_NODES__" in preamble:
@@ -2593,7 +2583,7 @@ def generate_full_openclash_config(rules_list=None, converted_rules=None):
     if "__PROVIDER_RESIDENTIAL_GROUPS__" in preamble:
         try:
             preamble = preamble.replace(
-                "__PROVIDER_RESIDENTIAL_GROUPS__", generate_provider_residential_groups_yaml(providers, country_filters)
+                "__PROVIDER_RESIDENTIAL_GROUPS__", generate_provider_residential_groups_yaml(providers)
             )
         except (ValueError, OSError) as error:
             return {"ok": False, "error": str(error)}
@@ -2601,7 +2591,7 @@ def generate_full_openclash_config(rules_list=None, converted_rules=None):
     if "__RESIDENTIAL_NODE__" in preamble:
         try:
             preamble = preamble.replace(
-                "__RESIDENTIAL_NODE__", generate_residential_reference_yaml(providers, country_filters)
+                "__RESIDENTIAL_NODE__", generate_residential_reference_yaml(providers)
             )
         except (ValueError, OSError) as error:
             return {"ok": False, "error": str(error)}
