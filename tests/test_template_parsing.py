@@ -144,7 +144,7 @@ custom_rules:
 
     def test_invalid_preamble_or_unexpanded_markers_preserve_output_without_dns(self):
         for preamble in ["proxy-groups: [unterminated\n",
-                         "proxy-groups:\n  - name: Proxy\n    type: select\n    use:\n      __ALLNODES__\n",
+                         "proxy-groups:\n  - name: Proxy\n    type: select\n    use:\n      __PROVIDER_NODES__\n",
                          "- scalar root\n"]:
             with self.subTest(preamble=preamble):
                 self.write_template("rule_mapping: {Direct: DIRECT}\ncustom_rules: ['MATCH,DIRECT']\n", preamble)
@@ -292,7 +292,7 @@ custom_rules:
         app.SUBSCRIBE_PATH.write_text(json.dumps({"providers": [provider], "user_agent": ua}), encoding="utf-8")
         self.write_template("rule_mapping: {Direct: DIRECT}\ncustom_rules: ['MATCH,DIRECT']\n",
                             "__PROXY_PROVIDERS__\nproxy-groups:\n  __PROVIDER_GROUPS__\n"
-                            "  - name: SELECTOR\n    type: select\n    use:\n      __ALLNODES__\n")
+                            "  - name: SELECTOR\n    type: select\n    use:\n      __PROVIDER_NODES__\n")
         result = app.generate_all_openclash_rules()
         self.assertTrue(result["ok"], result)
         generated = yaml.safe_load((app.OPENCLASH_DIR / app.OPENCLASH_ALL_FILENAME).read_text(encoding="utf-8"))

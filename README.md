@@ -171,7 +171,7 @@ OpenClash 配置模板，**私人配置，不提交 Git**。包含：
 
 | 占位符 | 替换为 |
 |--------|--------|
-| `__ALLNODES__` | 全部节点（机场名列表，放 `proxies:` 引用机场组，放 `use:` 平铺所有节点） |
+| `__PROVIDER_NODES__` | 全部节点（机场名列表，放 `proxies:` 引用机场组，放 `use:` 平铺所有节点） |
 | `__PROVIDER_GROUPS__` | 各机场策略组定义；`use_for_latency: true` 时为 url-test，否则为 select |
 | `__PROVIDER_COUNTRY_GROUPS__` | 所有启用 AI 的“机场·国家”延迟测速组定义，国家及过滤规则由 country_filter.json 决定 |
 | `__PROVIDER_COUNTRY_NODES__` | 所有启用 AI 的“机场·国家”组名称列表，可嵌入 AI 的 `proxies:` |
@@ -262,7 +262,7 @@ generate_all_openclash_rules()
   └── 调用 generate_full_openclash_config()，传入快照及转换结果
         ├── 读取 template.yaml → base settings + proxy-groups + rule_mapping
         ├── 读取 subscribe.json → proxy-providers
-        ├── 替换占位符（__ALLNODES__ 等）
+        ├── 替换占位符（__PROVIDER_NODES__ 等）
         ├── 复用转换结果，按 rule_mapping 追加策略组并生成内联 rules
         └── 写入 mapping/rule-set/openclash/openclash.yaml（完整配置）
 ```
@@ -302,7 +302,7 @@ generate_all_openclash_rules()
 ### 添加新机场
 
 1. 在 `mapping/config/subscribe.json` 的 `providers` 数组中添加条目
-2. 如果模板策略组需要引用新提供商，`mapping/config/template.yaml` 中 `__ALLNODES__` 会自动展开
+2. 如果模板策略组需要引用新提供商，`mapping/config/template.yaml` 中 `__PROVIDER_NODES__` 会自动展开
 
 ### 添加新规则
 

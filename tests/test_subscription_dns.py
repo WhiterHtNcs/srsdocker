@@ -19,7 +19,7 @@ proxy-groups:
   - name: SELECTOR
     type: select
     use:
-      __ALLNODES__
+      __PROVIDER_NODES__
   __PROVIDER_GROUPS__
 # ===== Generator-Only Sections =====
 rule_mapping:

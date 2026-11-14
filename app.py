@@ -2443,7 +2443,7 @@ def validate_generated_openclash_config(content):
     if not isinstance(config, dict):
         raise ValueError("生成配置的 YAML 顶层必须是映射。")
     unresolved = re.search(
-        r"__(?:ALLNODES|PROVIDER_GROUPS|RULE_GROUPS|PROVIDER_COUNTRY_GROUPS|"
+        r"__(?:PROVIDER_NODES|PROVIDER_GROUPS|RULE_GROUPS|PROVIDER_COUNTRY_GROUPS|"
         r"PROVIDER_COUNTRY_NODES|PROVIDER_RESIDENTIAL_GROUPS|RESIDENTIAL_NODE|"
         r"URL_TEST_OPTIONS|PROXY_PROVIDERS)__", content,
     )
@@ -2561,12 +2561,12 @@ def generate_full_openclash_config(rules_list=None, converted_rules=None):
         country_filters = get_country_node_filters() if ai_providers or get_residential_providers(providers) else []
     except (ValueError, OSError) as error:
         return {"ok": False, "error": str(error)}
-    if provider_names and "__ALLNODES__" in preamble:
-        # First line inherits indentation from where __ALLNODES__ sits in the template
+    if provider_names and "__PROVIDER_NODES__" in preamble:
+        # First line inherits indentation from where __PROVIDER_NODES__ sits in the template
         provider_lines = [f"- {dump_yaml_value(provider_names[0])}"]
         provider_lines += [f"      - {dump_yaml_value(name)}" for name in provider_names[1:]]
         providers_yaml_block = "\n".join(provider_lines)
-        preamble = preamble.replace("__ALLNODES__", providers_yaml_block)
+        preamble = preamble.replace("__PROVIDER_NODES__", providers_yaml_block)
 
     if provider_names and "__PROVIDER_GROUPS__" in preamble:
         group_lines = []
