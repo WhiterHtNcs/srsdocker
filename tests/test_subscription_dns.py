@@ -54,6 +54,19 @@ rules:
   - MATCH,DIRECT
 """
 
+SHADOWROCKET_TEMPLATE = """[General]
+dns-server = system
+[Proxy Group]
+Mobile = select,DIRECT
+[Rule]
+RULE-SET,https://rules.example/mobile.list,Mobile
+FINAL,DIRECT
+[Host]
+*.example = server:system
+localhost = 127.0.0.1
+[URL Rewrite]
+"""
+
 
 def subscription(servers, resolvers=None):
     return yaml.safe_dump({
@@ -105,6 +118,7 @@ class SubscriptionDnsTests(unittest.TestCase):
         mobile = app.TEMPLATE_PATH.parent / "mobile"
         mobile.mkdir()
         (mobile / "surfing_template.yaml").write_text(SURFING_TEMPLATE, encoding="utf-8")
+        app.get_shadowrocket_template_path().write_text(SHADOWROCKET_TEMPLATE, encoding="utf-8")
         original = mobile / "config.yaml"
         original.write_text("existing configuration", encoding="utf-8")
         self.providers[0].update(use_for_dns=True, user_agent="airport-ua", surfing_prefix="Main",
@@ -136,11 +150,22 @@ class SubscriptionDnsTests(unittest.TestCase):
         self.assertEqual(openclash["dns"]["proxy-server-nameserver-policy"], policy)
         self.assertEqual(config["dns"], {**template["dns"], "proxy-server-nameserver-policy": policy})
         self.assertEqual(original.read_text(encoding="utf-8"), "existing configuration")
+        shadowrocket = result["full_config"]["shadowrocket"]
+        self.assertTrue(shadowrocket["ok"], shadowrocket)
+        output = app.BASE_DIR / shadowrocket["path"]
+        self.assertEqual(output, app.OPENCLASH_DIR.parent / "mobile" / "shadowrocket.conf")
+        self.assertEqual(output.read_text(encoding="utf-8"), SHADOWROCKET_TEMPLATE.replace(
+            "[Host]\n",
+            "[Host]\n# DNS 下发：为下列节点域名指定解析服务器。\n"
+            "node.example = server:https://airport.example/dns-query\n",
+        ))
+        self.assertEqual(app.get_shadowrocket_template_path().read_text(encoding="utf-8"), SHADOWROCKET_TEMPLATE)
 
     def test_mobile_generation_uses_saved_subscriptions_without_openclash_rules(self):
         template_path = app.get_surfing_template_path()
         template_path.parent.mkdir()
         template_path.write_text(SURFING_TEMPLATE, encoding="utf-8")
+        app.get_shadowrocket_template_path().write_text(SHADOWROCKET_TEMPLATE, encoding="utf-8")
         app.TEMPLATE_PATH.unlink()
         desktop = app.OPENCLASH_DIR / app.OPENCLASH_ALL_FILENAME
         desktop.write_text("existing OpenClash configuration", encoding="utf-8")
@@ -148,15 +173,46 @@ class SubscriptionDnsTests(unittest.TestCase):
         self.providers[0].update(surfing_prefix="Main", use_for_dns=True)
         self.save_providers()
         app.get_provider_config_path(self.providers[0]).write_text(subscription(["node.example"]), encoding="utf-8")
-        with patch.object(app, "download_provider_subscription", side_effect=ValueError("offline")):
+        with patch.object(app, "download_provider_subscription", side_effect=ValueError("offline")) as download:
             result = app.generate_mobile_config()
 
+        download.assert_called_once()
         self.assertEqual(result["dns_providers"][0]["source"], "local")
         config = yaml.safe_load((app.BASE_DIR / result["path"]).read_text(encoding="utf-8"))
         self.assertEqual(config["proxy-providers"]["Airport A"]["override"]["additional-prefix"], "Main：")
         self.assertEqual(config["dns"]["proxy-server-nameserver-policy"], {"node.example": ["https://airport.example/dns-query"]})
         self.assertEqual(config["rules"], yaml.safe_load(SURFING_TEMPLATE)["rules"])
         self.assertEqual(desktop.read_text(encoding="utf-8"), "existing OpenClash configuration")
+        shadowrocket = (app.BASE_DIR / result["shadowrocket"]["path"]).read_text(encoding="utf-8")
+        self.assertIn("node.example = server:https://airport.example/dns-query\n", shadowrocket)
+
+    def test_shadowrocket_only_without_subscriptions_copies_template(self):
+        app.SUBSCRIBE_PATH.unlink()
+        template_path = app.get_shadowrocket_template_path()
+        template_path.parent.mkdir()
+        template = SHADOWROCKET_TEMPLATE.replace("\n", "\r\n").encode("utf-8-sig")
+        template_path.write_bytes(template)
+        with patch.object(app, "download_provider_subscription") as download:
+            result = app.generate_mobile_config()
+        download.assert_not_called()
+        self.assertNotIn("surfing", result)
+        self.assertEqual((app.BASE_DIR / result["path"]).read_bytes(), template)
+
+    def test_shadowrocket_dns_conflict_keeps_previous_output(self):
+        template_path = app.get_shadowrocket_template_path()
+        template_path.parent.mkdir()
+        template_path.write_text(SHADOWROCKET_TEMPLATE.replace("[Host]\n", "[Host]\nNODE.EXAMPLE = 192.0.2.1\n"), encoding="utf-8")
+        output = app.OPENCLASH_DIR.parent / "mobile" / "shadowrocket.conf"
+        output.parent.mkdir()
+        output.write_text("previous configuration", encoding="utf-8")
+        self.providers[0]["use_for_dns"] = True
+        self.save_providers()
+        with patch.object(app, "download_provider_subscription", return_value=subscription(["node.example"])):
+            result = app.generate_all_openclash_rules()
+        self.assertTrue(result["ok"], result)
+        self.assertFalse(result["full_config"]["shadowrocket"]["ok"])
+        self.assertIn("冲突", result["full_config"]["shadowrocket"]["error"])
+        self.assertEqual(output.read_text(encoding="utf-8"), "previous configuration")
 
     def test_invalid_surfing_template_keeps_previous_mobile_output(self):
         mobile = app.TEMPLATE_PATH.parent / "mobile"

@@ -289,7 +289,7 @@ generate_all_openclash_rules()
 | `/api/srs` | GET | 获取生成的 SRS 文件列表 |
 | `/api/remote/status`、`/api/remote/update` | GET / POST | 查看或更新远程规则源 |
 | `/api/generate/openclash/all` | POST | 生成完整 OpenClash 配置 |
-| `/api/generate/mobile` | POST | 单独生成 Surfing 配置 |
+| `/api/generate/mobile` | POST | 生成 Surfing 和小火箭配置 |
 
 ## OpenClash 使用方式
 
@@ -301,7 +301,9 @@ generate_all_openclash_rules()
 
 `mapping/config/mobile/surfing_template.yaml` 存在时，生成完整 OpenClash 配置也会生成 `mapping/rule-set/mobile/config.yaml`。手机的规则、规则集和策略组结构沿用手机模板，机场列表、订阅地址和节点 DNS 策略使用同一次生成的订阅数据。模板中共享订阅设置由 `&p` 提供，`use: __PROVIDER_NODES__` 展开为机场名称列表，`proxy-providers` 下的 `__PROXY_PROVIDERS__: {}` 展开为订阅定义。在订阅管理中选择 Surfing 前缀并保存，生成时会写成 `Main：` 或 `Minor：`。生成状态会单独显示 Surfing 的输出路径或错误。
 
-在规则管理或订阅管理中点击「生成 Mobile」可使用已保存的订阅单独生成 Surfing 配置。
+`mapping/config/mobile/shadowrocket_template.conf` 存在时，生成完整 OpenClash 配置也会生成 `mapping/rule-set/mobile/shadowrocket.conf`。生成器在 `[Host]` 中加入勾选「DNS 下发」的机场节点域名解析策略，模板中的节点、策略组和分流规则按原文输出。
+
+在规则管理或订阅管理中点击「生成 Mobile」也可直接生成已有模板对应的手机配置。
 
 ### 添加新机场
 

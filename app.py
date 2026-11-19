@@ -1254,7 +1254,7 @@ def dump_yaml_value(value):
     return json.dumps(value, ensure_ascii=False)
 
 
-def write_text_file_atomic(output_path, content):
+def write_text_file_atomic(output_path, content, *, newline=None):
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     temp_fd, temp_name = tempfile.mkstemp(
@@ -1266,7 +1266,7 @@ def write_text_file_atomic(output_path, content):
     temp_path = Path(temp_name)
 
     try:
-        temp_path.write_text(content, encoding="utf-8")
+        temp_path.write_text(content, encoding="utf-8", newline=newline)
         os.replace(temp_path, output_path)
     finally:
         try:
@@ -2523,6 +2523,10 @@ def get_surfing_template_path():
     return TEMPLATE_PATH.parent / "mobile" / "surfing_template.yaml"
 
 
+def get_shadowrocket_template_path():
+    return get_surfing_template_path().with_name("shadowrocket_template.conf")
+
+
 def generate_surfing_config(proxy_providers_yaml, providers, dns_policy):
     """Render the mobile template using the same subscriptions as OpenClash."""
     try:
@@ -2574,20 +2578,127 @@ def generate_surfing_config(proxy_providers_yaml, providers, dns_policy):
     return {"ok": True, "path": str(output_path.relative_to(BASE_DIR)), "provider_count": len(subscriptions)}
 
 
+def format_shadowrocket_dns_resolver(resolver):
+    endpoint, _, options = resolver.partition("#")
+    # Mihomo's explicit DIRECT uses the same local path as a plain Host resolver.
+    error = "小火箭 DNS 下发需要可直连的 DNS 地址，订阅包含无法转换的 DNS 格式或选项。"
+    if options not in ("", "DIRECT") or re.search(r"[\s,;\x00-\x1f\x7f]", endpoint):
+        raise ValueError(error)
+    endpoint = endpoint.removeprefix("udp://")
+    if endpoint == "system":
+        return endpoint
+    try:
+        ipaddress.ip_address(endpoint)
+        return endpoint
+    except ValueError:
+        pass
+    try:
+        parsed = urlparse(endpoint if "://" in endpoint else f"//{endpoint}")
+        port = parsed.port
+        if parsed.hostname and parsed.username is None:
+            if parsed.scheme in ("https", "h3", "quic", "tls", "tcp"):
+                return endpoint
+            if not parsed.scheme and not (parsed.path or parsed.query or parsed.params):
+                ipaddress.ip_address(parsed.hostname)
+                if port or endpoint.startswith("["):
+                    return endpoint
+    except ValueError as cause:
+        raise ValueError(error) from cause
+    raise ValueError(error)
+
+
+def merge_shadowrocket_dns_policy(template, dns_policy):
+    if not dns_policy:
+        return template
+
+    lines = template.splitlines(keepends=True)
+    newline = "\r\n" if "\r\n" in template else "\n"
+    host_index = next((i for i, line in enumerate(lines) if line.strip().lstrip("\ufeff").lower() == "[host]"), None)
+    existing = {}
+    if host_index is not None:
+        for line in lines[host_index + 1:]:
+            line = line.strip()
+            if line.startswith("["):
+                break
+            domain, separator, value = line.partition("=")
+            if separator:
+                existing[domain.strip().rstrip(".").lower()] = value.strip()
+
+    entries = []
+    for domain, resolvers in dns_policy.items():
+        addresses = dict.fromkeys(format_shadowrocket_dns_resolver(resolver) for resolver in resolvers)
+        if domain in existing:
+            prefix, _, value = existing[domain].partition(":")
+            if prefix.strip().lower() != "server" or set(addresses) != {item.strip() for item in value.split(",")}:
+                raise ValueError(f"小火箭模板 [Host] 中的「{domain}」与下发 DNS 冲突。")
+            continue
+        entries.append(f"{domain} = server:{','.join(addresses)}")
+
+    if not entries:
+        return template
+    block = newline.join(["# DNS 下发：为下列节点域名指定解析服务器。", *entries, ""])
+    if host_index is None:
+        separator = newline if template.endswith(("\n", "\r")) else newline * 2
+        return template + separator + "[Host]" + newline + block
+
+    header_end = host_index + 1
+    before = "".join(lines[:header_end])
+    if not before.endswith(("\n", "\r")):
+        before += newline
+    return before + block + "".join(lines[header_end:])
+
+
+def generate_shadowrocket_config(dns_policy):
+    try:
+        with get_shadowrocket_template_path().open(encoding="utf-8", newline="") as template_file:
+            template = template_file.read()
+    except FileNotFoundError:
+        return None
+    except UnicodeDecodeError as error:
+        raise ValueError("小火箭模板需要使用 UTF-8 编码。") from error
+
+    rendered = merge_shadowrocket_dns_policy(template, dns_policy)
+    output_path = OPENCLASH_DIR.parent / "mobile" / "shadowrocket.conf"
+    write_text_file_atomic(output_path, rendered, newline="")
+    return {"ok": True, "path": str(output_path.relative_to(BASE_DIR))}
+
+
+def generate_mobile_outputs(proxy_providers_yaml, providers, dns_policy):
+    outputs = {}
+    errors = []
+    for name, generate, args in (
+        ("surfing", generate_surfing_config, (proxy_providers_yaml, providers, dns_policy)),
+        ("shadowrocket", generate_shadowrocket_config, (dns_policy,)),
+    ):
+        try:
+            result = generate(*args)
+        except (OSError, ValueError) as error:
+            errors.append(error)
+            result = {"ok": False, "error": str(error)}
+        if result is not None:
+            outputs[name] = result
+    return outputs, errors
+
+
 def generate_mobile_config():
-    """Generate Surfing from the saved subscriptions and the mobile template."""
-    result = None
-    if get_surfing_template_path().is_file():
-        providers, global_ua = load_subscribe_config()
-        if not providers:
-            raise ValueError("Surfing 配置至少需要一个机场订阅。")
-        proxy_providers_yaml = generate_proxy_providers_yaml(providers, global_ua)
-        dns_policy, dns_info = collect_provider_dns_policy(providers, global_ua)
-        with GENERATE_LOCK:
-            result = generate_surfing_config(proxy_providers_yaml, providers, dns_policy)
+    """Generate the mobile templates from one snapshot of the saved DNS policies."""
+    has_surfing = get_surfing_template_path().is_file()
+    if not has_surfing and not get_shadowrocket_template_path().is_file():
+        raise ValueError("找不到手机模板 config/mobile/surfing_template.yaml 或 shadowrocket_template.conf。")
+
+    providers, global_ua = load_subscribe_config()
+    proxy_providers_yaml = (
+        generate_proxy_providers_yaml(providers, global_ua) if has_surfing and providers else ""
+    )
+    dns_policy, dns_info = collect_provider_dns_policy(providers, global_ua)
+    with GENERATE_LOCK:
+        outputs, errors = generate_mobile_outputs(proxy_providers_yaml, providers, dns_policy)
+    result = next((output for output in outputs.values() if output["ok"]), None)
     if result is None:
-        raise ValueError("找不到手机模板 config/mobile/surfing_template.yaml。")
-    return {**result, **dns_info}
+        if errors:
+            raise errors[0]
+        raise ValueError("找不到可用的手机模板。")
+    return {**result, **dns_info, **outputs}
 
 
 def generate_full_openclash_config(rules_list=None, converted_rules=None):
@@ -2751,10 +2862,7 @@ def generate_full_openclash_config(rules_list=None, converted_rules=None):
     output_path = OPENCLASH_DIR / OPENCLASH_ALL_FILENAME
     with GENERATE_LOCK:
         write_text_file_atomic(output_path, full_yaml)
-        try:
-            surfing_result = generate_surfing_config(proxy_providers_yaml, providers, dns_policy)
-        except (OSError, ValueError) as error:
-            surfing_result = {"ok": False, "error": str(error)}
+        mobile_outputs, _ = generate_mobile_outputs(proxy_providers_yaml, providers, dns_policy)
 
     return {
         "ok": True,
@@ -2762,7 +2870,7 @@ def generate_full_openclash_config(rules_list=None, converted_rules=None):
         "mapping_count": len(rule_mapping),
         "provider_count": len(providers),
         "proxy_providers": [p.get("name", "Unknown") for p in providers],
-        **({"surfing": surfing_result} if surfing_result is not None else {}),
+        **mobile_outputs,
         **dns_info,
     }
 

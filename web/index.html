@@ -1125,6 +1125,14 @@
       subscribeGenerateMobileBtn.disabled = busy;
     }
 
+    function mobileConfigMessages(result) {
+      return [["Surfing", result?.surfing], ["小火箭", result?.shadowrocket]]
+        .filter(([, output]) => output)
+        .map(([name, output]) => output.ok
+          ? `${name} 配置已生成：${output.path}`
+          : `${name} 配置生成失败：${output.error}`);
+    }
+
     async function generateOpenClashRules(reportStatus = setStatus) {
       reportStatus("正在生成 OpenClash YAML...");
       setConfigGenerationBusy(true);
@@ -1140,11 +1148,8 @@
           : result.full_config
             ? `，完整配置生成失败：${result.full_config.error}`
             : "";
-        const surfing = result.full_config?.surfing;
-        const surfingMsg = surfing
-          ? surfing.ok ? `。Surfing 配置已生成：${surfing.path}` : `。Surfing 配置生成失败：${surfing.error}`
-          : "";
-        reportStatus(`OpenClash 生成完成：成功 ${result.success_count} 个，失败 ${result.failure_count} 个${combinedPath}${fullConfigMsg}${surfingMsg}。`);
+        const summary = `OpenClash 生成完成：成功 ${result.success_count} 个，失败 ${result.failure_count} 个${combinedPath}${fullConfigMsg}`;
+        reportStatus([summary, ...mobileConfigMessages(result.full_config)].join("。") + "。");
       } finally {
         setConfigGenerationBusy(false);
       }
@@ -1156,8 +1161,11 @@
       try {
         const result = await postJson("/api/generate/mobile", {});
         showGenerateResult(result);
-        const dnsMsg = result.dns_policy_count ? `，DNS 下发 ${result.dns_policy_count} 个节点域名` : "";
-        reportStatus(`Mobile 配置已生成（${result.provider_count} 个机场订阅${dnsMsg}）。文件 ${result.path}`);
+        const messages = mobileConfigMessages(result);
+        if (result.dns_policy_count) {
+          messages.push(`DNS 下发 ${result.dns_policy_count} 个节点域名`);
+        }
+        reportStatus(messages.join("。") + "。");
       } catch (error) {
         reportStatus(`Mobile 配置生成失败。${error.message}`);
       } finally {
