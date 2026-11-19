@@ -37,8 +37,8 @@
 |   |-- rules-dat/         # 下载的 geosite / geoip JSON
 |   `-- rule-set/
 |       |-- srs/           # 生成的 SRS 文件
-|       `-- openclash/
-|           `-- openclash.yaml # 完整配置（可直接上传 OpenClash）
+|       |-- openclash/openclash.yaml # OpenClash 完整配置
+|       `-- mobile/config.yaml      # Surfing 完整配置（提供手机模板时生成）
 |-- web/
 |   `-- index.html         # 前端页面
 `-- .gitignore
@@ -113,9 +113,7 @@ python app.py
       "use_for_residential": false,
       "use_for_dns": false,
       "use_for_latency": false,
-      "override": {
-        "additional-prefix": "Main："
-      }
+      "surfing_prefix": "Main"
     }
   ]
 }
@@ -132,6 +130,7 @@ python app.py
 | `providers[].use_for_residential` | 是否创建该机场的家宽手动选择组，独立于 AI 开关，默认 `false` |
 | `providers[].use_for_dns` | 是否从订阅提取 DNS 并为该机场节点服务器域名生成定向解析策略，默认 `false` |
 | `providers[].use_for_latency` | 是否让该机场组自动选择延迟最低节点，默认 `false` |
+| `providers[].surfing_prefix` | Surfing 节点前缀，可选 `Main` 或 `Minor`，默认 `Minor` |
 | `providers[].override.additional-prefix` | 节点名前缀 |
 
 生成时会严格读取并校验订阅配置；JSON 损坏、文件无法读取或订阅字段格式无效时明确报错，保留已有完整输出。文件不存在仍视为空订阅，旧的 `default_user_agent` 字段继续兼容。
@@ -290,6 +289,7 @@ generate_all_openclash_rules()
 | `/api/srs` | GET | 获取生成的 SRS 文件列表 |
 | `/api/remote/status`、`/api/remote/update` | GET / POST | 查看或更新远程规则源 |
 | `/api/generate/openclash/all` | POST | 生成完整 OpenClash 配置 |
+| `/api/generate/mobile` | POST | 单独生成 Surfing 配置 |
 
 ## OpenClash 使用方式
 
@@ -298,6 +298,10 @@ generate_all_openclash_rules()
 将生成的 `mapping/rule-set/openclash/openclash.yaml` 上传到 OpenClash → 配置文件管理 → 导入。所有设置（订阅、策略组、规则）内联在单个文件中。
 
 ## 维护说明
+
+`mapping/config/mobile/surfing_template.yaml` 存在时，生成完整 OpenClash 配置也会生成 `mapping/rule-set/mobile/config.yaml`。手机的规则、规则集和策略组结构沿用手机模板，机场列表、订阅地址和节点 DNS 策略使用同一次生成的订阅数据。模板中共享订阅设置由 `&p` 提供，`use: __PROVIDER_NODES__` 展开为机场名称列表，`proxy-providers` 下的 `__PROXY_PROVIDERS__: {}` 展开为订阅定义。在订阅管理中选择 Surfing 前缀并保存，生成时会写成 `Main：` 或 `Minor：`。生成状态会单独显示 Surfing 的输出路径或错误。
+
+在规则管理或订阅管理中点击「生成 Mobile」可使用已保存的订阅单独生成 Surfing 配置。
 
 ### 添加新机场
 

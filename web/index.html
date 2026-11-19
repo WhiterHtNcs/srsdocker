@@ -338,6 +338,36 @@
       grid-column: 1 / -1;
     }
 
+    .surfing-prefix {
+      min-width: 0;
+      margin: 14px 0 0;
+      padding: 0;
+      border: 0;
+    }
+
+    .surfing-prefix legend {
+      padding: 0;
+      margin-bottom: 6px;
+      font-weight: 700;
+    }
+
+    .surfing-prefix-options {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 4px 16px;
+      min-height: 40px;
+    }
+
+    .surfing-prefix-options .check-row {
+      margin: 0;
+      font-weight: 400;
+    }
+
+    .surfing-prefix-options input[type="radio"] {
+      width: auto;
+    }
+
     .provider-options {
       display: flex;
       flex-wrap: wrap;
@@ -423,6 +453,7 @@
             <button id="generateRuleBtn" class="secondary" type="button" disabled>生成</button>
             <button id="generateAllBtn" class="secondary" type="button">全部生成</button>
             <button id="generateOpenClashBtn" class="secondary" type="button">生成 OpenClash</button>
+            <button id="generateMobileBtn" class="secondary" type="button">生成 Mobile</button>
             <button id="deleteRuleBtn" class="danger" type="button" disabled>删除</button>
           </div>
 
@@ -506,6 +537,7 @@
         <button id="saveSubscribeBtn" type="button">保存订阅</button>
         <button id="reloadSubscribeBtn" class="secondary" type="button">重新加载</button>
         <button id="subscribeGenerateOpenClashBtn" class="secondary" type="button">生成 OpenClash</button>
+        <button id="subscribeGenerateMobileBtn" class="secondary" type="button">生成 Mobile</button>
       </div>
       <div id="subscribeStatus" class="status" role="status" aria-live="polite"></div>
       <p class="hint">使用每个机场右上角的上移、下移按钮调整顺序，完成后点击“保存订阅”。保存后需重新生成</p>
@@ -537,6 +569,7 @@
     const saveSubscribeBtn = document.querySelector("#saveSubscribeBtn");
     const reloadSubscribeBtn = document.querySelector("#reloadSubscribeBtn");
     const subscribeGenerateOpenClashBtn = document.querySelector("#subscribeGenerateOpenClashBtn");
+    const subscribeGenerateMobileBtn = document.querySelector("#subscribeGenerateMobileBtn");
     const ruleList = document.querySelector("#ruleList");
     const ruleName = document.querySelector("#ruleName");
     const ruleContent = document.querySelector("#ruleContent");
@@ -545,6 +578,7 @@
     const generateRuleBtn = document.querySelector("#generateRuleBtn");
     const generateAllBtn = document.querySelector("#generateAllBtn");
     const generateOpenClashBtn = document.querySelector("#generateOpenClashBtn");
+    const generateMobileBtn = document.querySelector("#generateMobileBtn");
     const deleteRuleBtn = document.querySelector("#deleteRuleBtn");
     const statusText = document.querySelector("#status");
     const generateOutput = document.querySelector("#generateOutput");
@@ -552,6 +586,7 @@
     let rules = [];
     let selectedRuleName = "";
     let subscribeConfig = {user_agent: "", providers: []};
+    let providerCardId = 0;
 
     function setStatus(message) {
       statusText.textContent = message;
@@ -678,9 +713,8 @@
       return Array.isArray(value) ? value.join("\n") : (value || "");
     }
 
-    function createProviderInput(labelText, type, value, className = "") {
+    function createProviderInput(labelText, type, value) {
       const field = document.createElement("div");
-      field.className = className;
       const label = document.createElement("label");
       label.textContent = labelText;
       const input = document.createElement("input");
@@ -746,10 +780,32 @@
       interval.input.required = true;
       interval.input.dataset.field = "interval";
 
-      const url = createProviderInput("订阅地址", "url", provider.url || "", "wide");
+      const url = createProviderInput("订阅地址", "url", provider.url || "");
       url.input.required = true;
       url.input.placeholder = "https://example.com/subscribe";
       url.input.dataset.field = "url";
+
+      const prefixField = document.createElement("fieldset");
+      prefixField.className = "surfing-prefix";
+      const prefixLabel = document.createElement("legend");
+      prefixLabel.textContent = "Surfing 前缀";
+      const prefixOptions = document.createElement("div");
+      prefixOptions.className = "surfing-prefix-options";
+      const prefixGroup = `surfing-prefix-${++providerCardId}`;
+      const selectedPrefix = provider.surfing_prefix === "Main" ? "Main" : "Minor";
+      for (const value of ["Main", "Minor"]) {
+        const option = document.createElement("label");
+        option.className = "check-row";
+        const radio = document.createElement("input");
+        radio.type = "radio";
+        radio.name = prefixGroup;
+        radio.value = value;
+        radio.dataset.field = "surfing_prefix";
+        radio.checked = value === selectedPrefix;
+        option.append(radio, document.createTextNode(value));
+        prefixOptions.append(option);
+      }
+      prefixField.append(prefixLabel, prefixOptions);
 
       const aiField = document.createElement("label");
       aiField.className = "check-row";
@@ -787,7 +843,7 @@
       const options = document.createElement("div");
       options.className = "provider-options wide";
       options.append(aiField, residentialField, dnsField, latencyField);
-      grid.append(name.field, interval.field, url.field, options);
+      grid.append(name.field, interval.field, url.field, prefixField, options);
       card.append(heading, grid);
       return card;
     }
@@ -848,6 +904,7 @@
         provider.use_for_residential = card.querySelector('[data-field="use_for_residential"]').checked;
         provider.use_for_dns = card.querySelector('[data-field="use_for_dns"]').checked;
         provider.use_for_latency = card.querySelector('[data-field="use_for_latency"]').checked;
+        provider.surfing_prefix = card.querySelector('[data-field="surfing_prefix"]:checked').value;
         return provider;
       });
       return {...subscribeConfig, user_agent: userAgent, providers};
@@ -1061,10 +1118,16 @@
       }
     }
 
+    function setConfigGenerationBusy(busy) {
+      generateOpenClashBtn.disabled = busy;
+      subscribeGenerateOpenClashBtn.disabled = busy;
+      generateMobileBtn.disabled = busy;
+      subscribeGenerateMobileBtn.disabled = busy;
+    }
+
     async function generateOpenClashRules(reportStatus = setStatus) {
       reportStatus("正在生成 OpenClash YAML...");
-      generateOpenClashBtn.disabled = true;
-      subscribeGenerateOpenClashBtn.disabled = true;
+      setConfigGenerationBusy(true);
       try {
         const result = await postJson("/api/generate/openclash/all", {});
         showGenerateResult(result);
@@ -1077,10 +1140,28 @@
           : result.full_config
             ? `，完整配置生成失败：${result.full_config.error}`
             : "";
-        reportStatus(`OpenClash 生成完成：成功 ${result.success_count} 个，失败 ${result.failure_count} 个${combinedPath}${fullConfigMsg}。`);
+        const surfing = result.full_config?.surfing;
+        const surfingMsg = surfing
+          ? surfing.ok ? `。Surfing 配置已生成：${surfing.path}` : `。Surfing 配置生成失败：${surfing.error}`
+          : "";
+        reportStatus(`OpenClash 生成完成：成功 ${result.success_count} 个，失败 ${result.failure_count} 个${combinedPath}${fullConfigMsg}${surfingMsg}。`);
       } finally {
-        generateOpenClashBtn.disabled = false;
-        subscribeGenerateOpenClashBtn.disabled = false;
+        setConfigGenerationBusy(false);
+      }
+    }
+
+    async function generateMobileConfig(reportStatus = setStatus) {
+      reportStatus("正在生成 Mobile 配置...");
+      setConfigGenerationBusy(true);
+      try {
+        const result = await postJson("/api/generate/mobile", {});
+        showGenerateResult(result);
+        const dnsMsg = result.dns_policy_count ? `，DNS 下发 ${result.dns_policy_count} 个节点域名` : "";
+        reportStatus(`Mobile 配置已生成（${result.provider_count} 个机场订阅${dnsMsg}）。文件 ${result.path}`);
+      } catch (error) {
+        reportStatus(`Mobile 配置生成失败。${error.message}`);
+      } finally {
+        setConfigGenerationBusy(false);
       }
     }
 
@@ -1130,6 +1211,10 @@
       generateOpenClashRules(setSubscribeStatus).catch((error) => setSubscribeStatus(error.message));
     });
 
+    subscribeGenerateMobileBtn.addEventListener("click", () => {
+      generateMobileConfig(setSubscribeStatus);
+    });
+
     document.querySelector("#loadRulesBtn").addEventListener("click", () => {
       loadRules().then(() => setStatus("规则集列表已刷新。")).catch((error) => setStatus(error.message));
     });
@@ -1155,6 +1240,10 @@
 
     generateOpenClashBtn.addEventListener("click", () => {
       generateOpenClashRules().catch((error) => setStatus(error.message));
+    });
+
+    generateMobileBtn.addEventListener("click", () => {
+      generateMobileConfig();
     });
 
     Promise.all([loadConfig(), loadRules(), loadSubscriptions()]).catch((error) => setStatus(error.message));

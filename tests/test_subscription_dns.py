@@ -28,6 +28,32 @@ custom_rules:
   - 'MATCH,DIRECT'
 """
 
+SURFING_TEMPLATE = """p: &p
+  proxy: DIRECT
+  health-check: {enable: true, interval: 300}
+  header: {User-Agent: [surfing]}
+providers: &providers
+  use: __PROVIDER_NODES__
+proxy-providers:
+  __PROXY_PROVIDERS__: {}
+profile: {store-selected: true}
+dns:
+  enable: true
+  proxy-server-nameserver: [https://mobile.example/dns-query]
+proxy-groups:
+  - name: Mobile
+    type: select
+    <<: *providers
+rule-providers:
+  Mobile:
+    type: file
+    path: ./rules/mobile.list
+# Keep the phone's rules in template order.
+rules:
+  - RULE-SET,Mobile,Mobile
+  - MATCH,DIRECT
+"""
+
 
 def subscription(servers, resolvers=None):
     return yaml.safe_dump({
@@ -75,6 +101,77 @@ class SubscriptionDnsTests(unittest.TestCase):
     def read_generated(self):
         return yaml.safe_load((app.OPENCLASH_DIR / app.OPENCLASH_ALL_FILENAME).read_text(encoding="utf-8"))
 
+    def test_openclash_generation_renders_surfing_template_with_shared_dns(self):
+        mobile = app.TEMPLATE_PATH.parent / "mobile"
+        mobile.mkdir()
+        (mobile / "surfing_template.yaml").write_text(SURFING_TEMPLATE, encoding="utf-8")
+        original = mobile / "config.yaml"
+        original.write_text("existing configuration", encoding="utf-8")
+        self.providers[0].update(use_for_dns=True, user_agent="airport-ua", surfing_prefix="Main",
+                                 override={"additional-prefix": "Desktop:", "udp": True})
+        self.providers.append({"name": "Airport B", "url": "https://b.example/sub", "use_for_ai": False})
+        app.save_subscribe_data(app.validate_subscribe_data({"providers": self.providers}))
+        with patch.object(app, "download_provider_subscription", return_value=subscription(["node.example"])) as download:
+            result = app.generate_all_openclash_rules()
+        self.assertTrue(result["ok"], result)
+        download.assert_called_once()
+        surfing = result["full_config"]["surfing"]
+        self.assertTrue(surfing["ok"], surfing)
+        self.assertEqual(app.BASE_DIR / surfing["path"], app.OPENCLASH_DIR.parent / "mobile" / "config.yaml")
+        rendered = (app.BASE_DIR / surfing["path"]).read_text(encoding="utf-8")
+        config = yaml.safe_load(rendered)
+        template = yaml.safe_load(SURFING_TEMPLATE)
+        self.assertEqual(config["rules"], template["rules"])
+        self.assertEqual(config["rule-providers"], template["rule-providers"])
+        self.assertEqual(config["proxy-groups"], [{"name": "Mobile", "type": "select", "use": ["Airport A", "Airport B"]}])
+        self.assertEqual([p["url"] for p in config["proxy-providers"].values()], [p["url"] for p in self.providers])
+        self.assertEqual(config["proxy-providers"]["Airport A"]["override"], {"additional-prefix": "Main：", "udp": True})
+        self.assertEqual(config["proxy-providers"]["Airport B"]["override"], {"additional-prefix": "Minor："})
+        self.assertEqual(config["proxy-providers"]["Airport A"]["header"], {"User-Agent": ["airport-ua"]})
+        self.assertEqual(config["proxy-providers"]["Airport B"]["health-check"], template["p"]["health-check"])
+        policy = {"node.example": ["https://airport.example/dns-query"]}
+        openclash = self.read_generated()
+        self.assertEqual(openclash["proxy-providers"]["Airport A"]["override"], {"additional-prefix": "Desktop:", "udp": True})
+        self.assertNotIn("override", openclash["proxy-providers"]["Airport B"])
+        self.assertEqual(openclash["dns"]["proxy-server-nameserver-policy"], policy)
+        self.assertEqual(config["dns"], {**template["dns"], "proxy-server-nameserver-policy": policy})
+        self.assertEqual(original.read_text(encoding="utf-8"), "existing configuration")
+
+    def test_mobile_generation_uses_saved_subscriptions_without_openclash_rules(self):
+        template_path = app.get_surfing_template_path()
+        template_path.parent.mkdir()
+        template_path.write_text(SURFING_TEMPLATE, encoding="utf-8")
+        app.TEMPLATE_PATH.unlink()
+        desktop = app.OPENCLASH_DIR / app.OPENCLASH_ALL_FILENAME
+        desktop.write_text("existing OpenClash configuration", encoding="utf-8")
+
+        self.providers[0].update(surfing_prefix="Main", use_for_dns=True)
+        self.save_providers()
+        app.get_provider_config_path(self.providers[0]).write_text(subscription(["node.example"]), encoding="utf-8")
+        with patch.object(app, "download_provider_subscription", side_effect=ValueError("offline")):
+            result = app.generate_mobile_config()
+
+        self.assertEqual(result["dns_providers"][0]["source"], "local")
+        config = yaml.safe_load((app.BASE_DIR / result["path"]).read_text(encoding="utf-8"))
+        self.assertEqual(config["proxy-providers"]["Airport A"]["override"]["additional-prefix"], "Main：")
+        self.assertEqual(config["dns"]["proxy-server-nameserver-policy"], {"node.example": ["https://airport.example/dns-query"]})
+        self.assertEqual(config["rules"], yaml.safe_load(SURFING_TEMPLATE)["rules"])
+        self.assertEqual(desktop.read_text(encoding="utf-8"), "existing OpenClash configuration")
+
+    def test_invalid_surfing_template_keeps_previous_mobile_output(self):
+        mobile = app.TEMPLATE_PATH.parent / "mobile"
+        mobile.mkdir()
+        (mobile / "surfing_template.yaml").write_text("proxy-providers: [", encoding="utf-8")
+        output = app.OPENCLASH_DIR.parent / "mobile" / "config.yaml"
+        output.parent.mkdir()
+        output.write_text("previous mobile configuration", encoding="utf-8")
+        with patch.object(app, "download_provider_subscription") as download:
+            result = app.generate_all_openclash_rules()
+        download.assert_not_called()
+        self.assertTrue(result["ok"], result)
+        self.assertFalse(result["full_config"]["surfing"]["ok"])
+        self.assertEqual(output.read_text(encoding="utf-8"), "previous mobile configuration")
+
     def save_countries(self, countries):
         app.COUNTRY_FILTER_PATH.write_text(json.dumps({"countries": countries}), encoding="utf-8")
 
@@ -98,6 +195,11 @@ class SubscriptionDnsTests(unittest.TestCase):
         app.save_subscribe_data(normalized)
         self.assertTrue(app.load_subscribe_data()["providers"][0]["use_for_dns"])
         self.assertEqual(app.load_subscribe_data()["providers"][0]["extra"], "keep")
+
+    def test_surfing_prefix_rejects_unrecognized_values(self):
+        for prefix in (None, True, "", "Main：", "Other"):
+            with self.subTest(prefix=prefix), self.assertRaisesRegex(ValueError, "surfing_prefix"):
+                app.validate_subscribe_data({"providers": [{**self.providers[0], "surfing_prefix": prefix}]})
 
     def test_no_selection_skips_download_and_keeps_output_identical(self):
         with patch.object(app, "download_provider_subscription") as download:

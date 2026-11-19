@@ -1826,7 +1826,11 @@ def validate_subscribe_data(payload):
         if not isinstance(use_for_dns, bool):
             raise ValueError(f"Provider {index} use_for_dns must be true or false.")
 
-        canonical_keys = {"name", "url", "interval", "use_for_ai", "use_for_latency", "use_for_residential", "use_for_dns"}
+        surfing_prefix = provider.get("surfing_prefix", "Minor")
+        if surfing_prefix not in ("Main", "Minor"):
+            raise ValueError(f"Provider {index} surfing_prefix must be Main or Minor.")
+
+        canonical_keys = {"name", "url", "interval", "use_for_ai", "use_for_latency", "use_for_residential", "use_for_dns", "surfing_prefix"}
         normalized_provider = {
             "name": name,
             "url": url,
@@ -1835,6 +1839,7 @@ def validate_subscribe_data(payload):
             "use_for_latency": use_for_latency,
             "use_for_residential": use_for_residential,
             "use_for_dns": use_for_dns,
+            "surfing_prefix": surfing_prefix,
         }
         normalized_provider.update(
             {key: value for key, value in provider.items() if key not in canonical_keys}
@@ -1986,9 +1991,13 @@ def load_provider_dns_policy(provider, global_user_agent=None):
 
 def apply_provider_dns_policy(full_yaml, providers, global_user_agent=None):
     """Merge exact node-domain policies; keep unselected output byte-identical."""
+    incoming, info = collect_provider_dns_policy(providers, global_user_agent)
+    return merge_provider_dns_policy(full_yaml, incoming), info
+
+
+def collect_provider_dns_policy(providers, global_user_agent=None):
+    """Collect one snapshot of the subscription DNS policies for both configurations."""
     selected = [provider for provider in providers if provider.get("use_for_dns", False) is True]
-    if not selected:
-        return full_yaml, {"dns_policy_count": 0, "dns_providers": []}
     incoming = {}
     adapted = []
     for provider in selected:
@@ -2002,9 +2011,12 @@ def apply_provider_dns_policy(full_yaml, providers, global_user_agent=None):
                 raise ValueError(f"机场「{name}」DNS 策略冲突：多个机场对同一节点域名指定了不同 DNS。")
             incoming[domain] = resolvers
         adapted.append({"name": name, "domain_count": len(policy), **source_info})
-    info = {"dns_policy_count": len(incoming), "dns_providers": adapted}
+    return incoming, {"dns_policy_count": len(incoming), "dns_providers": adapted}
+
+
+def merge_provider_dns_policy(full_yaml, incoming):
     if not incoming:
-        return full_yaml, info
+        return full_yaml
     yaml = get_yaml_module()
     try:
         config = yaml.safe_load(full_yaml)
@@ -2044,6 +2056,11 @@ def apply_provider_dns_policy(full_yaml, providers, global_user_agent=None):
     # Replace only the generated DNS section; preserve the rest of the configuration.
     dns_key, dns_value = next((key, value) for key, value in root.value if key.value == "dns")
     replacement = yaml.safe_dump({"dns": dns}, allow_unicode=True, sort_keys=False)
+    replacement = replacement.replace(
+        "\n  proxy-server-nameserver-policy:",
+        "\n  # DNS 下发：为下列节点域名指定解析服务器。\n  proxy-server-nameserver-policy:",
+        1,
+    )
     if dns_value.flow_style:
         replacement = replacement.rstrip("\n")
     full_yaml = full_yaml[:dns_key.start_mark.index] + replacement + full_yaml[dns_value.end_mark.index:]
@@ -2051,7 +2068,7 @@ def apply_provider_dns_policy(full_yaml, providers, global_user_agent=None):
         yaml.safe_load(full_yaml)
     except yaml.YAMLError as error:
         raise ValueError("DNS 合并后的 YAML 无效，请检查模板中的 YAML 锚点引用。") from error
-    return full_yaml, info
+    return full_yaml
 
 
 def generate_proxy_providers_yaml(providers, global_user_agent=None):
@@ -2499,6 +2516,78 @@ def validate_generated_openclash_config(content):
                     f"生成配置的 {section}[{index}] 引用了不存在的策略组或节点「{target}」，"
                     "请检查 rule_mapping 和 custom_rules。"
                 )
+    return config
+
+
+def get_surfing_template_path():
+    return TEMPLATE_PATH.parent / "mobile" / "surfing_template.yaml"
+
+
+def generate_surfing_config(proxy_providers_yaml, providers, dns_policy):
+    """Render the mobile template using the same subscriptions as OpenClash."""
+    try:
+        template = get_surfing_template_path().read_text(encoding="utf-8-sig")
+    except FileNotFoundError:
+        return None
+
+    if not proxy_providers_yaml:
+        raise ValueError("Surfing 配置至少需要一个机场订阅。")
+    yaml = get_yaml_module()
+    try:
+        config = yaml.safe_load(template)
+        root = yaml.compose(template, Loader=yaml.SafeLoader)
+    except yaml.YAMLError as error:
+        raise ValueError("surfing_template.yaml 不是有效的 YAML。") from error
+
+    provider_section = config.get("proxy-providers") if isinstance(config, dict) else None
+    marker = "__PROXY_PROVIDERS__"
+    if not isinstance(provider_section, dict) or set(provider_section) != {marker}:
+        raise ValueError("surfing_template.yaml 的 proxy-providers 需要包含 __PROXY_PROVIDERS__ 占位符。")
+    if "use: __PROVIDER_NODES__" not in template:
+        raise ValueError("surfing_template.yaml 的订阅引用必须包含 use: __PROVIDER_NODES__。")
+
+    subscriptions = yaml.safe_load(proxy_providers_yaml)["proxy-providers"]
+    provider_lines = []
+    for provider in providers:
+        name = provider["name"]
+        subscription = subscriptions[name]
+        subscription.setdefault("override", {})["additional-prefix"] = f"{provider['surfing_prefix']}："
+        provider_lines.append(f"  {dump_yaml_value(name)}:")
+        provider_lines.append("    <<: *p")
+        fields = yaml.safe_dump(subscription, allow_unicode=True, sort_keys=False)
+        provider_lines.extend(f"    {line}" for line in fields.splitlines())
+
+    # Keep the section marker used by Surfing's backup script, and edit only its contents.
+    provider_node = next(value for key, value in root.value if key.value == "proxy-providers")
+    start = template.rfind("\n", 0, provider_node.start_mark.index) + 1
+    rendered = template[:start] + "\n".join(provider_lines) + "\n" + template[provider_node.end_mark.index:]
+    rendered = rendered.replace("use: __PROVIDER_NODES__", f"use: {dump_yaml_value(list(subscriptions))}")
+    rendered = merge_provider_dns_policy(rendered, dns_policy)
+    config = validate_generated_openclash_config(rendered)
+    for group in config.get("proxy-groups") or []:
+        use = group.get("use", [])
+        if not isinstance(use, list) or any(not isinstance(name, str) or name not in subscriptions for name in use):
+            raise ValueError(f"Surfing 策略组「{group['name']}」引用了不存在的机场订阅。")
+
+    output_path = OPENCLASH_DIR.parent / "mobile" / "config.yaml"
+    write_text_file_atomic(output_path, rendered)
+    return {"ok": True, "path": str(output_path.relative_to(BASE_DIR)), "provider_count": len(subscriptions)}
+
+
+def generate_mobile_config():
+    """Generate Surfing from the saved subscriptions and the mobile template."""
+    result = None
+    if get_surfing_template_path().is_file():
+        providers, global_ua = load_subscribe_config()
+        if not providers:
+            raise ValueError("Surfing 配置至少需要一个机场订阅。")
+        proxy_providers_yaml = generate_proxy_providers_yaml(providers, global_ua)
+        dns_policy, dns_info = collect_provider_dns_policy(providers, global_ua)
+        with GENERATE_LOCK:
+            result = generate_surfing_config(proxy_providers_yaml, providers, dns_policy)
+    if result is None:
+        raise ValueError("找不到手机模板 config/mobile/surfing_template.yaml。")
+    return {**result, **dns_info}
 
 
 def generate_full_openclash_config(rules_list=None, converted_rules=None):
@@ -2652,14 +2741,20 @@ def generate_full_openclash_config(rules_list=None, converted_rules=None):
     full_yaml = "\n".join(parts)
 
     try:
-        full_yaml, dns_info = apply_provider_dns_policy(full_yaml, providers, global_ua)
+        dns_policy, dns_info = collect_provider_dns_policy(providers, global_ua)
+        full_yaml = merge_provider_dns_policy(full_yaml, dns_policy)
         validate_generated_openclash_config(full_yaml)
     except ValueError as error:
         return {"ok": False, "error": str(error)}
 
     # Step 5: Write output
     output_path = OPENCLASH_DIR / OPENCLASH_ALL_FILENAME
-    write_text_file_atomic(output_path, full_yaml)
+    with GENERATE_LOCK:
+        write_text_file_atomic(output_path, full_yaml)
+        try:
+            surfing_result = generate_surfing_config(proxy_providers_yaml, providers, dns_policy)
+        except (OSError, ValueError) as error:
+            surfing_result = {"ok": False, "error": str(error)}
 
     return {
         "ok": True,
@@ -2667,6 +2762,7 @@ def generate_full_openclash_config(rules_list=None, converted_rules=None):
         "mapping_count": len(rule_mapping),
         "provider_count": len(providers),
         "proxy_providers": [p.get("name", "Unknown") for p in providers],
+        **({"surfing": surfing_result} if surfing_result is not None else {}),
         **dns_info,
     }
 
@@ -2838,6 +2934,10 @@ class AppHandler(SimpleHTTPRequestHandler):
             self.handle_generate_openclash_all()
             return
 
+        if parsed.path == "/api/generate/mobile":
+            self.handle_generate_mobile()
+            return
+
         if parsed.path == "/api/remote/update":
             self.handle_remote_update()
             return
@@ -2980,6 +3080,16 @@ class AppHandler(SimpleHTTPRequestHandler):
 
     def handle_generate_openclash_all(self):
         self.send_json(generate_all_openclash_rules())
+
+    def handle_generate_mobile(self):
+        try:
+            result = generate_mobile_config()
+        except ValueError as error:
+            self.send_json({"error": str(error)}, status=HTTPStatus.BAD_REQUEST)
+        except OSError as error:
+            self.send_json({"error": str(error)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+        else:
+            self.send_json(result)
 
     def handle_remote_update(self):
         result = update_remote_rules(load_config())
