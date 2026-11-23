@@ -7,9 +7,9 @@
 - **规则集管理**：新建、编辑、删除、查看、手动排序 `mapping/rules/*.txt`
 - **规则转换**：生成 sing-box JSON 规则文件
 - **SRS 生成**：调用 `sing-box rule-set compile` 生成 `.srs`
-- **OpenClash 完整配置生成**：
+- **OpenClash / FlClash 完整配置生成**：
   - 从 `mapping/config/subscribe.json` 读取多机场订阅，生成 `proxy-providers`
-  - 从 `mapping/config/template.yaml` 读取策略组结构，自动填充提供商列表
+  - 从 `mapping/config/clash/openclash_template.yaml`（兼容旧路径 `mapping/config/template.yaml`）和可选的 `mapping/config/clash/flclash_template.yaml` 读取策略组结构，自动填充提供商列表
   - 可按机场启用 DNS 下发，从完整订阅配置提取 DNS，仅适配对应节点服务器域名
   - 从 `mapping/rules/*.txt` 读取规则，内联到 `rules:` 节（无需外部文件引用）
   - IP 规则自动合并（`Direct.txt` + `DirectIP.txt` → `Direct`）
@@ -32,13 +32,16 @@
 |-- mapping/               # 运行时数据（gitignored）
 |   |-- bin/               # sing-box 二进制文件
 |   |-- config/            # 订阅、模板、country_filter.json、residential_filter.json 等运行时配置
-|   |   |-- providers/     # 下载的机场完整订阅配置，命名为 机场名.yaml
+|   |   |-- clash/         # OpenClash / FlClash 模板（openclash_template.yaml、flclash_template.yaml）
+|   |   |-- mobile/        # 手机端模板（surfing_template.yaml、shadowrocket_template.conf）
+|   |   `-- providers/     # 下载的机场完整订阅配置，命名为 机场名.yaml
 |   |-- rules/             # 用户规则 txt
 |   |-- rules-dat/         # 下载的 geosite / geoip JSON
 |   `-- rule-set/
 |       |-- srs/           # 生成的 SRS 文件
-|       |-- openclash/openclash.yaml # OpenClash 完整配置
-|       `-- mobile/config.yaml      # Surfing 完整配置（提供手机模板时生成）
+|       |-- clash/openclash.yaml     # OpenClash 完整配置
+|       |-- clash/flclash.yaml       # FlClash 完整配置（提供 FlClash 模板时生成）
+|       `-- mobile/config.yaml       # Surfing 完整配置（提供手机模板时生成）
 |-- web/
 |   `-- index.html         # 前端页面
 `-- .gitignore
@@ -83,7 +86,7 @@ git pull --ff-only
 docker compose up -d --build
 ```
 
-`mapping/` 是挂载的运行时数据目录，执行上述更新不会覆盖其中的订阅、模板、规则和已生成配置。更新后刷新网页；若修改了生成逻辑或模板，再点击“生成 OpenClash”生成新的配置文件。
+`mapping/` 是挂载的运行时数据目录，执行上述更新不会覆盖其中的订阅、模板、规则和已生成配置。更新后刷新网页；若修改了生成逻辑或模板，再点击“生成 Clash”生成新的配置文件。
 
 ### 本地运行
 
@@ -156,11 +159,11 @@ python app.py
 - `timeout`：单次测速超时，单位毫秒。
 - `lazy`：是否按需测速。
 
-可在 Web UI 的“测速设置”标签页修改；保存后需重新生成 OpenClash 配置才会写入 YAML。
+可在 Web UI 的“测速设置”标签页修改；保存后需重新生成 Clash 配置才会写入 YAML。
 
-### `mapping/config/template.yaml`
+### `mapping/config/clash/openclash_template.yaml` 与 `flclash_template.yaml`
 
-OpenClash 配置模板，**私人配置，不提交 Git**。包含：
+OpenClash 与 FlClash 配置模板，**私人配置，不提交 Git**（兼容读取旧路径 `mapping/config/template.yaml`）。当 `mapping/config/clash/flclash_template.yaml` 存在时，生成 OpenClash 配置会复用同一份订阅、规则快照和 DNS 下发策略，同步生成 `mapping/rule-set/clash/flclash.yaml`。模板包含：
 - 基础设置（端口、DNS、Sniffer 等）
 - 策略组结构（proxy-groups）
 - 规则映射（rule_mapping）
@@ -252,18 +255,18 @@ rule_mapping:
 ### OpenClash 配置生成流程
 
 ```
-点击 "生成 OpenClash"
+点击 "生成 Clash"
         │
         ▼
 generate_all_openclash_rules()
   ├── 一次读取规则文件，保存本次生成的内容快照
   ├── 规则合并：X.txt + XIP.txt → X，每个合并后的规则集转换一次
   └── 调用 generate_full_openclash_config()，传入快照及转换结果
-        ├── 读取 template.yaml → base settings + proxy-groups + rule_mapping
+        ├── 读取 clash/openclash_template.yaml → base settings + proxy-groups + rule_mapping
         ├── 读取 subscribe.json → proxy-providers
         ├── 替换占位符（__PROVIDER_NODES__ 等）
         ├── 复用转换结果，按 rule_mapping 追加策略组并生成内联 rules
-        └── 写入 mapping/rule-set/openclash/openclash.yaml（完整配置）
+        └── 写入 mapping/rule-set/clash/openclash.yaml（以及可选的 clash/flclash.yaml）
 ```
 
 规则校验和完整配置输出使用同一份规则内容。快照读取后对规则文件的修改、增删在下一次生成生效；配套 IP 规则、`no-resolve`、模板映射及自定义规则的原有顺序保持一致。
@@ -295,7 +298,7 @@ generate_all_openclash_rules()
 
 ### 上传完整配置
 
-将生成的 `mapping/rule-set/openclash/openclash.yaml` 上传到 OpenClash → 配置文件管理 → 导入。所有设置（订阅、策略组、规则）内联在单个文件中。
+将生成的 `mapping/rule-set/clash/openclash.yaml` 上传到 OpenClash → 配置文件管理 → 导入。所有设置（订阅、策略组、规则）内联在单个文件中。
 
 ## 维护说明
 

@@ -30,9 +30,12 @@ WEB_DIR = BASE_DIR / "web"
 RULES_DIR = MAPPING_DIR / "rules"
 RULE_SET_DIR = MAPPING_DIR / "rule-set"
 SRS_DIR = RULE_SET_DIR / "srs"
-OPENCLASH_DIR = RULE_SET_DIR / "openclash"
+CLASH_DIR = RULE_SET_DIR / "clash"
+OPENCLASH_DIR = CLASH_DIR
 OPENCLASH_ALL_FILENAME = "openclash.yaml"
-TEMPLATE_PATH = MAPPING_DIR / "config" / "template.yaml"
+FLCLASH_ALL_FILENAME = "flclash.yaml"
+TEMPLATE_PATH = MAPPING_DIR / "config" / "clash" / "openclash_template.yaml"
+FLCLASH_TEMPLATE_FILENAME = "flclash_template.yaml"
 SUBSCRIBE_PATH = MAPPING_DIR / "config" / "subscribe.json"
 PORTS_PATH = MAPPING_DIR / "config" / "ports.json"
 RESIDENTIAL_FILTER_PATH = MAPPING_DIR / "config" / "residential_filter.json"
@@ -105,11 +108,12 @@ class RuleConversionError(Exception):
 def ensure_directories():
     MAPPING_DIR.mkdir(parents=True, exist_ok=True)
     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    TEMPLATE_PATH.parent.mkdir(parents=True, exist_ok=True)
     (SUBSCRIBE_PATH.parent / "providers").mkdir(parents=True, exist_ok=True)
     RULES_DIR.mkdir(exist_ok=True)
     RULE_SET_DIR.mkdir(exist_ok=True)
     SRS_DIR.mkdir(exist_ok=True)
-    OPENCLASH_DIR.mkdir(exist_ok=True)
+    OPENCLASH_DIR.mkdir(parents=True, exist_ok=True)
     (RULES_DAT_DIR / "geosite").mkdir(parents=True, exist_ok=True)
     (RULES_DAT_DIR / "geoip").mkdir(parents=True, exist_ok=True)
     WEB_DIR.mkdir(exist_ok=True)
@@ -1706,7 +1710,7 @@ def generate_all_openclash_rules():
         output_path = OPENCLASH_DIR / OPENCLASH_ALL_FILENAME
         # Do not replace an existing full config with rule-only YAML before DNS
         # downloads/validation succeed. Retain the legacy output without a template.
-        has_template = TEMPLATE_PATH.exists()
+        has_template = get_openclash_template_path().exists()
         try:
             full_config_result = generate_full_openclash_config(rules_list=rules, converted_rules=converted_rules)
         except Exception as error:
@@ -1944,8 +1948,13 @@ def get_provider_config_path(provider):
     config_dir = SUBSCRIBE_PATH.parent.resolve()
     providers_dir = (config_dir / "providers").resolve()
     path = providers_dir / f"{name}.yaml"
+    reserved_names = {
+        TEMPLATE_PATH.name.casefold(),
+        get_flclash_template_path().name.casefold(),
+        "template.yaml",
+    }
     if (providers_dir.parent != config_dir or path.resolve().parent != providers_dir
-            or path.name.casefold() == TEMPLATE_PATH.name.casefold()):
+            or path.name.casefold() in reserved_names):
         raise ValueError("机场配置文件名与模板冲突或超出 config/providers 目录。")
     return path
 
@@ -2315,17 +2324,35 @@ def generate_residential_reference_yaml(providers):
     return "\n".join([f"- {dump_yaml_value(names[0])}", *[f"      - {dump_yaml_value(name)}" for name in names[1:]]])
 
 
-def read_template():
-    """Read template.yaml, return preamble + parsed generator sections.
+def get_openclash_template_path():
+    if TEMPLATE_PATH.exists():
+        return TEMPLATE_PATH
+    legacy = CONFIG_PATH.parent / "template.yaml"
+    if legacy != TEMPLATE_PATH and legacy.exists():
+        return legacy
+    return TEMPLATE_PATH
+
+
+def get_flclash_template_path():
+    return TEMPLATE_PATH.with_name(FLCLASH_TEMPLATE_FILENAME)
+
+
+def get_flclash_output_path():
+    return OPENCLASH_DIR / FLCLASH_ALL_FILENAME
+
+
+def read_template(template_path=None):
+    """Read a Clash template YAML, return preamble + parsed generator sections.
 
     Returns:
         dict with keys: preamble, rule_mapping, custom_rules
         Returns None if template not found.
     """
-    if not TEMPLATE_PATH.exists():
+    path = get_openclash_template_path() if template_path is None else Path(template_path)
+    if not path.exists():
         return None
 
-    text = TEMPLATE_PATH.read_text(encoding="utf-8")
+    text = path.read_text(encoding="utf-8")
 
     # Split at the generator-only marker
     marker = "# ===== Generator-Only Sections"
@@ -2520,7 +2547,7 @@ def validate_generated_openclash_config(content):
 
 
 def get_surfing_template_path():
-    return TEMPLATE_PATH.parent / "mobile" / "surfing_template.yaml"
+    return CONFIG_PATH.parent / "mobile" / "surfing_template.yaml"
 
 
 def get_shadowrocket_template_path():
@@ -2701,62 +2728,35 @@ def generate_mobile_config():
     return {**result, **dns_info, **outputs}
 
 
-def generate_full_openclash_config(rules_list=None, converted_rules=None):
-    """Generate full OpenClash configuration YAML.
-
-    Combines:
-      1. template.yaml preamble (base settings, proxy-groups)
-      2. proxy-providers from subscribe.json
-      3. rule-providers from rules/*.txt + rule_mapping
-      4. rules from rule_mapping + custom_rules
-
-    Returns dict with result info, or {"ok": false, "error": ...} on failure.
-    """
-    # Step 1: Load template
-    template = read_template()
-    if template is None:
-        return {
-            "ok": False,
-            "error": "Template not found: openclash/template.yaml",
-        }
-
-    rule_mapping = template.get("rule_mapping", {})
-    custom_rules = template.get("custom_rules", [])
-
-    # Filter rule_mapping: remove IP rules that will be merged into their base
-    if rules_list is None:
-        rules_list = list_rules()
-    rule_snapshot = {rule["name"]: rule["content"] for rule in rules_list}
-    effective_names, _ = get_merged_rule_names(rules_list)
-    rule_mapping = {k: v for k, v in rule_mapping.items() if k in effective_names}
-
+def expand_clash_template(
+    template,
+    *,
+    effective_names,
+    providers,
+    url_test_config,
+    country_filters,
+    proxy_providers_yaml,
+    direct_ports,
+    rule_snapshot,
+    converted_rules,
+):
+    """Expand a Clash template preamble and append inline rules."""
+    rule_mapping = {
+        k: v for k, v in template.get("rule_mapping", {}).items() if k in effective_names
+    }
     if not rule_mapping:
-        return {"ok": False, "error": "rule_mapping is empty in template."}
+        raise ValueError("rule_mapping is empty in template.")
 
-    # Step 2: Load subscriptions and shared url-test settings
-    try:
-        providers, global_ua = load_subscribe_config()
-    except ValueError as error:
-        return {"ok": False, "error": str(error)}
-    try:
-        url_test_config = validate_url_test_config(load_stored_config().get("url_test", {}))
-    except ValueError as error:
-        return {"ok": False, "error": f"Invalid URL-test configuration: {error}"}
-
-    # Step 2.5: Replace provider-related placeholders
+    custom_rules = template.get("custom_rules", [])
     provider_names = [p.get("name", "Unknown") for p in providers]
     ai_providers = get_ai_providers(providers)
     preamble = template["preamble"]
-    try:
-        country_filters = get_country_node_filters() if ai_providers else []
-    except (ValueError, OSError) as error:
-        return {"ok": False, "error": str(error)}
+
     if provider_names and "__PROVIDER_NODES__" in preamble:
         # First line inherits indentation from where __PROVIDER_NODES__ sits in the template
         provider_lines = [f"- {dump_yaml_value(provider_names[0])}"]
         provider_lines += [f"      - {dump_yaml_value(name)}" for name in provider_names[1:]]
-        providers_yaml_block = "\n".join(provider_lines)
-        preamble = preamble.replace("__PROVIDER_NODES__", providers_yaml_block)
+        preamble = preamble.replace("__PROVIDER_NODES__", "\n".join(provider_lines))
 
     if provider_names and "__PROVIDER_GROUPS__" in preamble:
         group_lines = []
@@ -2770,40 +2770,38 @@ def generate_full_openclash_config(rules_list=None, converted_rules=None):
             group_lines.append("    type: url-test" if provider.get("use_for_latency", False) else "    type: select")
             if provider.get("use_for_latency", False):
                 group_lines.extend(f"    {line}" for line in get_url_test_option_lines(url_test_config))
-            group_lines.append(f"    use:")
+            group_lines.append("    use:")
             group_lines.append(f"      - {dump_yaml_value(name)}")
-        provider_groups_block = "\n".join(group_lines)
-        preamble = preamble.replace("__PROVIDER_GROUPS__", provider_groups_block)
+        preamble = preamble.replace("__PROVIDER_GROUPS__", "\n".join(group_lines))
 
     if "__PROVIDER_COUNTRY_GROUPS__" in preamble:
         preamble = preamble.replace(
-            "__PROVIDER_COUNTRY_GROUPS__", generate_provider_country_groups_yaml(ai_providers, url_test_config, country_filters)
+            "__PROVIDER_COUNTRY_GROUPS__",
+            generate_provider_country_groups_yaml(ai_providers, url_test_config, country_filters),
         )
 
     if "__PROVIDER_RESIDENTIAL_GROUPS__" in preamble:
-        try:
-            preamble = preamble.replace(
-                "__PROVIDER_RESIDENTIAL_GROUPS__", generate_provider_residential_groups_yaml(providers)
-            )
-        except (ValueError, OSError) as error:
-            return {"ok": False, "error": str(error)}
+        preamble = preamble.replace(
+            "__PROVIDER_RESIDENTIAL_GROUPS__",
+            generate_provider_residential_groups_yaml(providers),
+        )
 
     if "__RESIDENTIAL_NODE__" in preamble:
-        try:
-            preamble = preamble.replace(
-                "__RESIDENTIAL_NODE__", generate_residential_reference_yaml(providers)
-            )
-        except (ValueError, OSError) as error:
-            return {"ok": False, "error": str(error)}
+        preamble = preamble.replace(
+            "__RESIDENTIAL_NODE__",
+            generate_residential_reference_yaml(providers),
+        )
 
     if "__URL_TEST_OPTIONS__" in preamble:
         preamble = preamble.replace(
-            "__URL_TEST_OPTIONS__", generate_url_test_options_yaml(url_test_config)
+            "__URL_TEST_OPTIONS__",
+            generate_url_test_options_yaml(url_test_config),
         )
 
     if "__PROVIDER_COUNTRY_NODES__" in preamble:
         preamble = preamble.replace(
-            "__PROVIDER_COUNTRY_NODES__", generate_provider_country_references_yaml(ai_providers, country_filters)
+            "__PROVIDER_COUNTRY_NODES__",
+            generate_provider_country_references_yaml(ai_providers, country_filters),
         )
 
     if "__RULE_GROUPS__" in preamble:
@@ -2817,22 +2815,22 @@ def generate_full_openclash_config(rules_list=None, converted_rules=None):
                 rule_group_lines.append(f"- name: {dump_yaml_value(rule_name)}")
             else:
                 rule_group_lines.append(f"  - name: {dump_yaml_value(rule_name)}")
-            rule_group_lines.append(f"  type: select")
-            rule_group_lines.append(f"  proxies:")
-            rule_group_lines.append(f"    - ALL·延迟最低")
+            rule_group_lines.append("  type: select")
+            rule_group_lines.append("  proxies:")
+            rule_group_lines.append("    - ALL·延迟最低")
             for name in provider_names:
                 rule_group_lines.append(f"    - {dump_yaml_value(name)}")
-            rule_group_lines.append(f"    - 🌐 本机·本地直连")
-        rule_groups_block = "\n".join(rule_group_lines)
-        preamble = preamble.replace("__RULE_GROUPS__", rule_groups_block)
+            rule_group_lines.append("    - 🌐 本机·本地直连")
+        preamble = preamble.replace("__RULE_GROUPS__", "\n".join(rule_group_lines))
 
-    # Step 3: Generate YAML sections
-    proxy_providers_yaml = generate_proxy_providers_yaml(providers, global_ua) if providers else ""
-    direct_ports = load_ports_config()
-    rules_yaml = generate_rules_yaml(rule_mapping, custom_rules, direct_ports,
-                                     rule_snapshot=rule_snapshot, converted_rules=converted_rules)
+    rules_yaml = generate_rules_yaml(
+        rule_mapping,
+        custom_rules,
+        direct_ports,
+        rule_snapshot=rule_snapshot,
+        converted_rules=converted_rules,
+    )
 
-    # Step 4: Assemble
     # Insert proxy-providers at __PROXY_PROVIDERS__ marker in the preamble
     proxy_marker = "__PROXY_PROVIDERS__"
     if proxy_marker in preamble and proxy_providers_yaml:
@@ -2849,8 +2847,110 @@ def generate_full_openclash_config(rules_list=None, converted_rules=None):
     parts.append(rules_yaml.rstrip())
     parts.append("")
 
-    full_yaml = "\n".join(parts)
+    return "\n".join(parts), rule_mapping
 
+
+def generate_flclash_config(
+    *,
+    effective_names,
+    providers,
+    url_test_config,
+    country_filters,
+    proxy_providers_yaml,
+    direct_ports,
+    rule_snapshot,
+    converted_rules,
+    dns_policy,
+):
+    """Render config/clash/flclash_template.yaml into rule-set/clash/flclash.yaml."""
+    template_path = get_flclash_template_path()
+    if not template_path.is_file():
+        return None
+
+    template = read_template(template_path)
+    rendered, rule_mapping = expand_clash_template(
+        template,
+        effective_names=effective_names,
+        providers=providers,
+        url_test_config=url_test_config,
+        country_filters=country_filters,
+        proxy_providers_yaml=proxy_providers_yaml,
+        direct_ports=direct_ports,
+        rule_snapshot=rule_snapshot,
+        converted_rules=converted_rules,
+    )
+    rendered = merge_provider_dns_policy(rendered, dns_policy)
+    validate_generated_openclash_config(rendered)
+
+    output_path = get_flclash_output_path()
+    write_text_file_atomic(output_path, rendered)
+    return {
+        "ok": True,
+        "path": str(output_path.relative_to(BASE_DIR)),
+        "mapping_count": len(rule_mapping),
+        "provider_count": len(providers),
+    }
+
+
+def generate_full_openclash_config(rules_list=None, converted_rules=None):
+    """Generate full OpenClash configuration YAML (and optional FlClash/mobile outputs).
+
+    Combines:
+      1. config/clash/openclash_template.yaml preamble (base settings, proxy-groups)
+      2. proxy-providers from subscribe.json
+      3. rules from rules/*.txt + rule_mapping + custom_rules
+
+    Returns dict with result info, or {"ok": false, "error": ...} on failure.
+    """
+    # Step 1: Load template
+    template = read_template()
+    if template is None:
+        return {
+            "ok": False,
+            "error": "Template not found: config/clash/openclash_template.yaml",
+        }
+
+    # Filter rule_mapping: remove IP rules that will be merged into their base
+    if rules_list is None:
+        rules_list = list_rules()
+    rule_snapshot = {rule["name"]: rule["content"] for rule in rules_list}
+    effective_names, _ = get_merged_rule_names(rules_list)
+
+    # Step 2: Load subscriptions and shared url-test settings
+    try:
+        providers, global_ua = load_subscribe_config()
+    except ValueError as error:
+        return {"ok": False, "error": str(error)}
+    try:
+        url_test_config = validate_url_test_config(load_stored_config().get("url_test", {}))
+    except ValueError as error:
+        return {"ok": False, "error": f"Invalid URL-test configuration: {error}"}
+
+    ai_providers = get_ai_providers(providers)
+    try:
+        country_filters = get_country_node_filters() if ai_providers else []
+    except (ValueError, OSError) as error:
+        return {"ok": False, "error": str(error)}
+
+    # Step 3: Render OpenClash template
+    proxy_providers_yaml = generate_proxy_providers_yaml(providers, global_ua) if providers else ""
+    direct_ports = load_ports_config()
+    try:
+        full_yaml, rule_mapping = expand_clash_template(
+            template,
+            effective_names=effective_names,
+            providers=providers,
+            url_test_config=url_test_config,
+            country_filters=country_filters,
+            proxy_providers_yaml=proxy_providers_yaml,
+            direct_ports=direct_ports,
+            rule_snapshot=rule_snapshot,
+            converted_rules=converted_rules,
+        )
+    except (ValueError, OSError) as error:
+        return {"ok": False, "error": str(error)}
+
+    # Step 4: Collect DNS policy once and validate OpenClash output
     try:
         dns_policy, dns_info = collect_provider_dns_policy(providers, global_ua)
         full_yaml = merge_provider_dns_policy(full_yaml, dns_policy)
@@ -2858,11 +2958,30 @@ def generate_full_openclash_config(rules_list=None, converted_rules=None):
     except ValueError as error:
         return {"ok": False, "error": str(error)}
 
-    # Step 5: Write output
+    # Step 5: Write OpenClash, optional FlClash, and optional mobile outputs
     output_path = OPENCLASH_DIR / OPENCLASH_ALL_FILENAME
     with GENERATE_LOCK:
         write_text_file_atomic(output_path, full_yaml)
+        flclash_output = None
+        try:
+            flclash_output = generate_flclash_config(
+                effective_names=effective_names,
+                providers=providers,
+                url_test_config=url_test_config,
+                country_filters=country_filters,
+                proxy_providers_yaml=proxy_providers_yaml,
+                direct_ports=direct_ports,
+                rule_snapshot=rule_snapshot,
+                converted_rules=converted_rules,
+                dns_policy=dns_policy,
+            )
+        except (OSError, ValueError) as error:
+            flclash_output = {"ok": False, "error": str(error)}
         mobile_outputs, _ = generate_mobile_outputs(proxy_providers_yaml, providers, dns_policy)
+
+    extra_outputs = dict(mobile_outputs)
+    if flclash_output is not None:
+        extra_outputs["flclash"] = flclash_output
 
     return {
         "ok": True,
@@ -2870,7 +2989,7 @@ def generate_full_openclash_config(rules_list=None, converted_rules=None):
         "mapping_count": len(rule_mapping),
         "provider_count": len(providers),
         "proxy_providers": [p.get("name", "Unknown") for p in providers],
-        **mobile_outputs,
+        **extra_outputs,
         **dns_info,
     }
 

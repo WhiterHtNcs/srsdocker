@@ -452,7 +452,7 @@
             <button id="saveRuleBtn" type="submit">创建</button>
             <button id="generateRuleBtn" class="secondary" type="button" disabled>生成</button>
             <button id="generateAllBtn" class="secondary" type="button">全部生成</button>
-            <button id="generateOpenClashBtn" class="secondary" type="button">生成 OpenClash</button>
+            <button id="generateOpenClashBtn" class="secondary" type="button">生成 Clash</button>
             <button id="generateMobileBtn" class="secondary" type="button">生成 Mobile</button>
             <button id="deleteRuleBtn" class="danger" type="button" disabled>删除</button>
           </div>
@@ -536,7 +536,7 @@
         <button id="addProviderBtn" type="button">添加机场</button>
         <button id="saveSubscribeBtn" type="button">保存订阅</button>
         <button id="reloadSubscribeBtn" class="secondary" type="button">重新加载</button>
-        <button id="subscribeGenerateOpenClashBtn" class="secondary" type="button">生成 OpenClash</button>
+        <button id="subscribeGenerateOpenClashBtn" class="secondary" type="button">生成 Clash</button>
         <button id="subscribeGenerateMobileBtn" class="secondary" type="button">生成 Mobile</button>
       </div>
       <div id="subscribeStatus" class="status" role="status" aria-live="polite"></div>
@@ -698,7 +698,7 @@
         }
       };
       const result = await postJson("/api/config", payload);
-      setUrlTestStatus(`测速设置已保存。请重新生成 OpenClash 配置后生效（${result.config_path || "config.json"}）。`);
+      setUrlTestStatus(`测速设置已保存。请重新生成 Clash 配置后生效（${result.config_path || "config.json"}）。`);
       await loadConfig();
     }
 
@@ -1125,16 +1125,20 @@
       subscribeGenerateMobileBtn.disabled = busy;
     }
 
-    function mobileConfigMessages(result) {
-      return [["Surfing", result?.surfing], ["小火箭", result?.shadowrocket]]
+    function extraConfigMessages(result, items) {
+      return items
         .filter(([, output]) => output)
         .map(([name, output]) => output.ok
           ? `${name} 配置已生成：${output.path}`
           : `${name} 配置生成失败：${output.error}`);
     }
 
+    function mobileConfigMessages(result) {
+      return extraConfigMessages(result, [["Surfing", result?.surfing], ["小火箭", result?.shadowrocket]]);
+    }
+
     async function generateOpenClashRules(reportStatus = setStatus) {
-      reportStatus("正在生成 OpenClash YAML...");
+      reportStatus("正在生成 Clash YAML...");
       setConfigGenerationBusy(true);
       try {
         const result = await postJson("/api/generate/openclash/all", {});
@@ -1148,8 +1152,13 @@
           : result.full_config
             ? `，完整配置生成失败：${result.full_config.error}`
             : "";
-        const summary = `OpenClash 生成完成：成功 ${result.success_count} 个，失败 ${result.failure_count} 个${combinedPath}${fullConfigMsg}`;
-        reportStatus([summary, ...mobileConfigMessages(result.full_config)].join("。") + "。");
+        const summary = `Clash 生成完成：成功 ${result.success_count} 个，失败 ${result.failure_count} 个${combinedPath}${fullConfigMsg}`;
+        const extras = extraConfigMessages(result.full_config, [
+          ["FlClash", result.full_config?.flclash],
+          ["Surfing", result.full_config?.surfing],
+          ["小火箭", result.full_config?.shadowrocket]
+        ]);
+        reportStatus([summary, ...extras].join("。") + "。");
       } finally {
         setConfigGenerationBusy(false);
       }

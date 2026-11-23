@@ -83,6 +83,7 @@ class SubscriptionDnsTests(unittest.TestCase):
         root = Path(self.temp.name)
         config_dir = root / "config"
         config_dir.mkdir()
+        (config_dir / "clash").mkdir()
         (config_dir / "providers").mkdir()
         rules_dir = root / "rules"
         rules_dir.mkdir()
@@ -91,7 +92,7 @@ class SubscriptionDnsTests(unittest.TestCase):
         paths = {
             "BASE_DIR": root, "CONFIG_PATH": config_dir / "config.json",
             "ORDER_PATH": config_dir / "order.json",
-            "TEMPLATE_PATH": config_dir / "template.yaml",
+            "TEMPLATE_PATH": config_dir / "clash" / "openclash_template.yaml",
             "SUBSCRIBE_PATH": config_dir / "subscribe.json",
             "PORTS_PATH": config_dir / "ports.json",
             "RESIDENTIAL_FILTER_PATH": config_dir / "residential_filter.json",
@@ -115,7 +116,7 @@ class SubscriptionDnsTests(unittest.TestCase):
         return yaml.safe_load((app.OPENCLASH_DIR / app.OPENCLASH_ALL_FILENAME).read_text(encoding="utf-8"))
 
     def test_openclash_generation_renders_surfing_template_with_shared_dns(self):
-        mobile = app.TEMPLATE_PATH.parent / "mobile"
+        mobile = app.CONFIG_PATH.parent / "mobile"
         mobile.mkdir()
         (mobile / "surfing_template.yaml").write_text(SURFING_TEMPLATE, encoding="utf-8")
         app.get_shadowrocket_template_path().write_text(SHADOWROCKET_TEMPLATE, encoding="utf-8")
@@ -215,7 +216,7 @@ class SubscriptionDnsTests(unittest.TestCase):
         self.assertEqual(output.read_text(encoding="utf-8"), "previous configuration")
 
     def test_invalid_surfing_template_keeps_previous_mobile_output(self):
-        mobile = app.TEMPLATE_PATH.parent / "mobile"
+        mobile = app.CONFIG_PATH.parent / "mobile"
         mobile.mkdir()
         (mobile / "surfing_template.yaml").write_text("proxy-providers: [", encoding="utf-8")
         output = app.OPENCLASH_DIR.parent / "mobile" / "config.yaml"
@@ -227,6 +228,43 @@ class SubscriptionDnsTests(unittest.TestCase):
         self.assertTrue(result["ok"], result)
         self.assertFalse(result["full_config"]["surfing"]["ok"])
         self.assertEqual(output.read_text(encoding="utf-8"), "previous mobile configuration")
+
+    def test_openclash_generation_renders_flclash_template_with_shared_dns(self):
+        flclash_template = BASE_CONFIG.replace(
+            "dns:\n",
+            "find-process-mode: strict\ngeox-url:\n  asn: https://example.com/GeoLite2-ASN.mmdb\ndns:\n",
+            1,
+        )
+        app.get_flclash_template_path().write_text(flclash_template, encoding="utf-8")
+        self.providers[0]["use_for_dns"] = True
+        self.save_providers()
+        with patch.object(app, "download_provider_subscription", return_value=subscription(["node.example"])) as download:
+            result = app.generate_all_openclash_rules()
+        self.assertTrue(result["ok"], result)
+        download.assert_called_once()
+        flclash = result["full_config"]["flclash"]
+        self.assertTrue(flclash["ok"], flclash)
+        output = app.BASE_DIR / flclash["path"]
+        self.assertEqual(output, app.get_flclash_output_path())
+        rendered = yaml.safe_load(output.read_text(encoding="utf-8"))
+        self.assertEqual(rendered["find-process-mode"], "strict")
+        self.assertEqual(rendered["geox-url"]["asn"], "https://example.com/GeoLite2-ASN.mmdb")
+        self.assertEqual(rendered["dns"]["proxy-server-nameserver-policy"], {
+            "node.example": ["https://airport.example/dns-query"],
+        })
+        self.assertEqual(rendered["rules"], ["DOMAIN-SUFFIX,example.com,DIRECT", "MATCH,DIRECT"])
+
+    def test_invalid_flclash_template_keeps_previous_output_and_succeeds_openclash(self):
+        app.get_flclash_template_path().write_text("proxy-groups: [\n# ===== Generator-Only Sections =====\nrule_mapping:\n  Direct: DIRECT\n", encoding="utf-8")
+        output = app.get_flclash_output_path()
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text("previous flclash configuration", encoding="utf-8")
+        with patch.object(app, "download_provider_subscription") as download:
+            result = app.generate_all_openclash_rules()
+        download.assert_not_called()
+        self.assertTrue(result["ok"], result)
+        self.assertFalse(result["full_config"]["flclash"]["ok"])
+        self.assertEqual(output.read_text(encoding="utf-8"), "previous flclash configuration")
 
     def save_countries(self, countries):
         app.COUNTRY_FILTER_PATH.write_text(json.dumps({"countries": countries}), encoding="utf-8")

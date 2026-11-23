@@ -27,6 +27,7 @@ class TemplateParsingTests(unittest.TestCase):
         root = Path(temp.name)
         config = root / "config"
         config.mkdir()
+        (config / "clash").mkdir()
         rules = root / "rules"
         rules.mkdir()
         output = root / "output"
@@ -35,7 +36,7 @@ class TemplateParsingTests(unittest.TestCase):
             "BASE_DIR": root,
             "CONFIG_PATH": config / "config.json",
             "ORDER_PATH": config / "order.json",
-            "TEMPLATE_PATH": config / "template.yaml",
+            "TEMPLATE_PATH": config / "clash" / "openclash_template.yaml",
             "SUBSCRIBE_PATH": config / "subscribe.json",
             "PORTS_PATH": config / "ports.json",
             "RULES_DIR": rules,
@@ -411,6 +412,19 @@ custom_rules:
         generated = yaml.safe_load((app.OPENCLASH_DIR / app.OPENCLASH_ALL_FILENAME).read_text(encoding="utf-8"))
         self.assertEqual(generated["payload"], ["DOMAIN-SUFFIX,example.com,Direct",
                                                "IP-CIDR,198.51.100.0/24,Direct,no-resolve"])
+
+    def test_legacy_template_path_fallback_still_works(self):
+        app.TEMPLATE_PATH.unlink(missing_ok=True)
+        legacy = app.CONFIG_PATH.parent / "template.yaml"
+        legacy.write_text(
+            PREAMBLE + MARKER + "rule_mapping:\n  Direct: DIRECT\ncustom_rules:\n  - 'MATCH,DIRECT'\n",
+            encoding="utf-8",
+        )
+        result = app.generate_all_openclash_rules()
+        self.assertTrue(result["ok"], result)
+        self.assertTrue(result["full_config"]["ok"], result["full_config"])
+        generated = yaml.safe_load((app.OPENCLASH_DIR / app.OPENCLASH_ALL_FILENAME).read_text(encoding="utf-8"))
+        self.assertEqual(generated["rules"], ["DOMAIN-SUFFIX,example.com,DIRECT", "MATCH,DIRECT"])
 
 
 if __name__ == "__main__":
