@@ -33,9 +33,9 @@ SRS_DIR = RULE_SET_DIR / "srs"
 CLASH_DIR = RULE_SET_DIR / "clash"
 OPENCLASH_DIR = CLASH_DIR
 OPENCLASH_ALL_FILENAME = "openclash.yaml"
-FLCLASH_ALL_FILENAME = "flclash.yaml"
+CLASHMIHOMO_ALL_FILENAME = "clashmihomo.yaml"
 TEMPLATE_PATH = MAPPING_DIR / "config" / "clash" / "openclash_template.yaml"
-FLCLASH_TEMPLATE_FILENAME = "flclash_template.yaml"
+CLASHMIHOMO_TEMPLATE_FILENAME = "clashmihomo_template.yaml"
 SUBSCRIBE_PATH = MAPPING_DIR / "config" / "subscribe.json"
 PORTS_PATH = MAPPING_DIR / "config" / "ports.json"
 RESIDENTIAL_FILTER_PATH = MAPPING_DIR / "config" / "residential_filter.json"
@@ -1950,7 +1950,7 @@ def get_provider_config_path(provider):
     path = providers_dir / f"{name}.yaml"
     reserved_names = {
         TEMPLATE_PATH.name.casefold(),
-        get_flclash_template_path().name.casefold(),
+        get_clashmihomo_template_path().name.casefold(),
         "template.yaml",
     }
     if (providers_dir.parent != config_dir or path.resolve().parent != providers_dir
@@ -2333,12 +2333,12 @@ def get_openclash_template_path():
     return TEMPLATE_PATH
 
 
-def get_flclash_template_path():
-    return TEMPLATE_PATH.with_name(FLCLASH_TEMPLATE_FILENAME)
+def get_clashmihomo_template_path():
+    return TEMPLATE_PATH.with_name(CLASHMIHOMO_TEMPLATE_FILENAME)
 
 
-def get_flclash_output_path():
-    return OPENCLASH_DIR / FLCLASH_ALL_FILENAME
+def get_clashmihomo_output_path():
+    return OPENCLASH_DIR / CLASHMIHOMO_ALL_FILENAME
 
 
 def read_template(template_path=None):
@@ -2850,7 +2850,7 @@ def expand_clash_template(
     return "\n".join(parts), rule_mapping
 
 
-def generate_flclash_config(
+def generate_clashmihomo_config(
     *,
     effective_names,
     providers,
@@ -2862,8 +2862,8 @@ def generate_flclash_config(
     converted_rules,
     dns_policy,
 ):
-    """Render config/clash/flclash_template.yaml into rule-set/clash/flclash.yaml."""
-    template_path = get_flclash_template_path()
+    """Render config/clash/clashmihomo_template.yaml into rule-set/clash/clashmihomo.yaml."""
+    template_path = get_clashmihomo_template_path()
     if not template_path.is_file():
         return None
 
@@ -2882,7 +2882,7 @@ def generate_flclash_config(
     rendered = merge_provider_dns_policy(rendered, dns_policy)
     validate_generated_openclash_config(rendered)
 
-    output_path = get_flclash_output_path()
+    output_path = get_clashmihomo_output_path()
     write_text_file_atomic(output_path, rendered)
     return {
         "ok": True,
@@ -2893,7 +2893,7 @@ def generate_flclash_config(
 
 
 def generate_full_openclash_config(rules_list=None, converted_rules=None):
-    """Generate full OpenClash configuration YAML (and optional FlClash/mobile outputs).
+    """Generate full OpenClash configuration YAML (and optional ClashMihomo/mobile outputs).
 
     Combines:
       1. config/clash/openclash_template.yaml preamble (base settings, proxy-groups)
@@ -2958,13 +2958,13 @@ def generate_full_openclash_config(rules_list=None, converted_rules=None):
     except ValueError as error:
         return {"ok": False, "error": str(error)}
 
-    # Step 5: Write OpenClash, optional FlClash, and optional mobile outputs
+    # Step 5: Write OpenClash, optional ClashMihomo, and optional mobile outputs
     output_path = OPENCLASH_DIR / OPENCLASH_ALL_FILENAME
     with GENERATE_LOCK:
         write_text_file_atomic(output_path, full_yaml)
-        flclash_output = None
+        clashmihomo_output = None
         try:
-            flclash_output = generate_flclash_config(
+            clashmihomo_output = generate_clashmihomo_config(
                 effective_names=effective_names,
                 providers=providers,
                 url_test_config=url_test_config,
@@ -2976,12 +2976,12 @@ def generate_full_openclash_config(rules_list=None, converted_rules=None):
                 dns_policy=dns_policy,
             )
         except (OSError, ValueError) as error:
-            flclash_output = {"ok": False, "error": str(error)}
+            clashmihomo_output = {"ok": False, "error": str(error)}
         mobile_outputs, _ = generate_mobile_outputs(proxy_providers_yaml, providers, dns_policy)
 
     extra_outputs = dict(mobile_outputs)
-    if flclash_output is not None:
-        extra_outputs["flclash"] = flclash_output
+    if clashmihomo_output is not None:
+        extra_outputs["clashmihomo"] = clashmihomo_output
 
     return {
         "ok": True,

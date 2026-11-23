@@ -7,9 +7,9 @@
 - **规则集管理**：新建、编辑、删除、查看、手动排序 `mapping/rules/*.txt`
 - **规则转换**：生成 sing-box JSON 规则文件
 - **SRS 生成**：调用 `sing-box rule-set compile` 生成 `.srs`
-- **OpenClash / FlClash 完整配置生成**：
+- **OpenClash / ClashMihomo 完整配置生成**：
   - 从 `mapping/config/subscribe.json` 读取多机场订阅，生成 `proxy-providers`
-  - 从 `mapping/config/clash/openclash_template.yaml`（兼容旧路径 `mapping/config/template.yaml`）和可选的 `mapping/config/clash/flclash_template.yaml` 读取策略组结构，自动填充提供商列表
+  - 从 `mapping/config/clash/openclash_template.yaml`（兼容旧路径 `mapping/config/template.yaml`）和可选的 `mapping/config/clash/clashmihomo_template.yaml` 读取策略组结构，自动填充提供商列表
   - 可按机场启用 DNS 下发，从完整订阅配置提取 DNS，仅适配对应节点服务器域名
   - 从 `mapping/rules/*.txt` 读取规则，内联到 `rules:` 节（无需外部文件引用）
   - IP 规则自动合并（`Direct.txt` + `DirectIP.txt` → `Direct`）
@@ -32,7 +32,7 @@
 |-- mapping/               # 运行时数据（gitignored）
 |   |-- bin/               # sing-box 二进制文件
 |   |-- config/            # 订阅、模板、country_filter.json、residential_filter.json 等运行时配置
-|   |   |-- clash/         # OpenClash / FlClash 模板（openclash_template.yaml、flclash_template.yaml）
+|   |   |-- clash/         # OpenClash / ClashMihomo 模板（openclash_template.yaml、clashmihomo_template.yaml）
 |   |   |-- mobile/        # 手机端模板（surfing_template.yaml、shadowrocket_template.conf）
 |   |   `-- providers/     # 下载的机场完整订阅配置，命名为 机场名.yaml
 |   |-- rules/             # 用户规则 txt
@@ -40,7 +40,7 @@
 |   `-- rule-set/
 |       |-- srs/           # 生成的 SRS 文件
 |       |-- clash/openclash.yaml     # OpenClash 完整配置
-|       |-- clash/flclash.yaml       # FlClash 完整配置（提供 FlClash 模板时生成）
+|       |-- clash/clashmihomo.yaml   # ClashMihomo 完整配置（提供 clashmihomo 模板时生成）
 |       `-- mobile/config.yaml       # Surfing 完整配置（提供手机模板时生成）
 |-- web/
 |   `-- index.html         # 前端页面
@@ -161,9 +161,9 @@ python app.py
 
 可在 Web UI 的“测速设置”标签页修改；保存后需重新生成 Clash 配置才会写入 YAML。
 
-### `mapping/config/clash/openclash_template.yaml` 与 `flclash_template.yaml`
+### `mapping/config/clash/openclash_template.yaml` 与 `clashmihomo_template.yaml`
 
-OpenClash 与 FlClash 配置模板，**私人配置，不提交 Git**（兼容读取旧路径 `mapping/config/template.yaml`）。当 `mapping/config/clash/flclash_template.yaml` 存在时，生成 OpenClash 配置会复用同一份订阅、规则快照和 DNS 下发策略，同步生成 `mapping/rule-set/clash/flclash.yaml`。模板包含：
+OpenClash 与 ClashMihomo 配置模板，**私人配置，不提交 Git**（兼容读取旧路径 `mapping/config/template.yaml`）。当 `mapping/config/clash/clashmihomo_template.yaml` 存在时，生成 Clash 配置会复用同一份订阅、规则快照和 DNS 下发策略，同步生成 `mapping/rule-set/clash/clashmihomo.yaml`。模板包含：
 - 基础设置（端口、DNS、Sniffer 等）
 - 策略组结构（proxy-groups）
 - 规则映射（rule_mapping）
@@ -266,7 +266,7 @@ generate_all_openclash_rules()
         ├── 读取 subscribe.json → proxy-providers
         ├── 替换占位符（__PROVIDER_NODES__ 等）
         ├── 复用转换结果，按 rule_mapping 追加策略组并生成内联 rules
-        └── 写入 mapping/rule-set/clash/openclash.yaml（以及可选的 clash/flclash.yaml）
+        └── 写入 mapping/rule-set/clash/openclash.yaml（以及可选的 clash/clashmihomo.yaml）
 ```
 
 规则校验和完整配置输出使用同一份规则内容。快照读取后对规则文件的修改、增删在下一次生成生效；配套 IP 规则、`no-resolve`、模板映射及自定义规则的原有顺序保持一致。

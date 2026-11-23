@@ -229,23 +229,23 @@ class SubscriptionDnsTests(unittest.TestCase):
         self.assertFalse(result["full_config"]["surfing"]["ok"])
         self.assertEqual(output.read_text(encoding="utf-8"), "previous mobile configuration")
 
-    def test_openclash_generation_renders_flclash_template_with_shared_dns(self):
-        flclash_template = BASE_CONFIG.replace(
+    def test_openclash_generation_renders_clashmihomo_template_with_shared_dns(self):
+        clashmihomo_template = BASE_CONFIG.replace(
             "dns:\n",
             "find-process-mode: strict\ngeox-url:\n  asn: https://example.com/GeoLite2-ASN.mmdb\ndns:\n",
             1,
         )
-        app.get_flclash_template_path().write_text(flclash_template, encoding="utf-8")
+        app.get_clashmihomo_template_path().write_text(clashmihomo_template, encoding="utf-8")
         self.providers[0]["use_for_dns"] = True
         self.save_providers()
         with patch.object(app, "download_provider_subscription", return_value=subscription(["node.example"])) as download:
             result = app.generate_all_openclash_rules()
         self.assertTrue(result["ok"], result)
         download.assert_called_once()
-        flclash = result["full_config"]["flclash"]
-        self.assertTrue(flclash["ok"], flclash)
-        output = app.BASE_DIR / flclash["path"]
-        self.assertEqual(output, app.get_flclash_output_path())
+        clashmihomo = result["full_config"]["clashmihomo"]
+        self.assertTrue(clashmihomo["ok"], clashmihomo)
+        output = app.BASE_DIR / clashmihomo["path"]
+        self.assertEqual(output, app.get_clashmihomo_output_path())
         rendered = yaml.safe_load(output.read_text(encoding="utf-8"))
         self.assertEqual(rendered["find-process-mode"], "strict")
         self.assertEqual(rendered["geox-url"]["asn"], "https://example.com/GeoLite2-ASN.mmdb")
@@ -254,17 +254,17 @@ class SubscriptionDnsTests(unittest.TestCase):
         })
         self.assertEqual(rendered["rules"], ["DOMAIN-SUFFIX,example.com,DIRECT", "MATCH,DIRECT"])
 
-    def test_invalid_flclash_template_keeps_previous_output_and_succeeds_openclash(self):
-        app.get_flclash_template_path().write_text("proxy-groups: [\n# ===== Generator-Only Sections =====\nrule_mapping:\n  Direct: DIRECT\n", encoding="utf-8")
-        output = app.get_flclash_output_path()
+    def test_invalid_clashmihomo_template_keeps_previous_output_and_succeeds_openclash(self):
+        app.get_clashmihomo_template_path().write_text("proxy-groups: [\n# ===== Generator-Only Sections =====\nrule_mapping:\n  Direct: DIRECT\n", encoding="utf-8")
+        output = app.get_clashmihomo_output_path()
         output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text("previous flclash configuration", encoding="utf-8")
+        output.write_text("previous clashmihomo configuration", encoding="utf-8")
         with patch.object(app, "download_provider_subscription") as download:
             result = app.generate_all_openclash_rules()
         download.assert_not_called()
         self.assertTrue(result["ok"], result)
-        self.assertFalse(result["full_config"]["flclash"]["ok"])
-        self.assertEqual(output.read_text(encoding="utf-8"), "previous flclash configuration")
+        self.assertFalse(result["full_config"]["clashmihomo"]["ok"])
+        self.assertEqual(output.read_text(encoding="utf-8"), "previous clashmihomo configuration")
 
     def save_countries(self, countries):
         app.COUNTRY_FILTER_PATH.write_text(json.dumps({"countries": countries}), encoding="utf-8")
