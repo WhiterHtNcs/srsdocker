@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -77,7 +78,7 @@ DEFAULT_CONFIG = {
 RULE_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 GEO_CODE_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.!@+\-]{0,127}$")
 CRON_FIELD_PATTERN = re.compile(r"^[A-Za-z0-9*/,\-]+$")
-DOMAIN_LIKE_PATTERN = re.compile(r"^(?=.{1,253}$)(?!-)[A-Za-z0-9_.*-]+(?:\.[A-Za-z0-9_.*-]+)+\.?$")
+DOMAIN_LIKE_PATTERN = re.compile(r"^\.?(?=.{1,253}$)(?!-)[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)+\.?$")
 KEYWORD_LIKE_PATTERN = re.compile(r"^[A-Za-z0-9_.!@+*-]+$")
 PROVIDER_NAME_PATTERN = re.compile(r"^[^\r\n:#{}\[\],&*!|>'\"%@`]{1,128}$")
 
@@ -1011,6 +1012,16 @@ def _update_remote_rules(config=None, required=None, missing_only=False):
     }
 
 
+def format_cron_env_assignment(key, value):
+    if "\n" in value or "\r" in value:
+        raise ValueError(f"Environment variable {key} must not contain newlines.")
+    if '"' not in value:
+        return f'{key}="{value}"'
+    if "'" not in value:
+        return f"{key}='{value}'"
+    raise ValueError(f"Environment variable {key} contains unsupported quote characters for crontab.")
+
+
 def build_cron_content(config):
     enabled = bool(config.get("auto_update_enabled", False))
     schedule = validate_cron_expression(config.get("auto_update_cron", DEFAULT_CONFIG["auto_update_cron"]))
@@ -1018,27 +1029,44 @@ def build_cron_content(config):
     for key in ("GEOSITE_URL", "GEOIP_URL", "GITHUB_TOKEN"):
         value = os.environ.get(key)
         if value and "\n" not in value and "\r" not in value:
-            env_lines.append(f'{key}="{value}"')
+            try:
+                env_lines.append(format_cron_env_assignment(key, value))
+            except ValueError:
+                continue
 
     if not enabled:
         return "\n".join(env_lines + ["# singbox-srs-generator remote rule auto update is disabled", ""])
 
     python_bin = os.environ.get("PYTHON_BIN", sys.executable)
-    job = (
-        f"{schedule} root cd {BASE_DIR} && {python_bin} {BASE_DIR / 'app.py'} "
+    command = (
+        f"cd {shlex.quote(BASE_DIR.as_posix())} && "
+        f"{shlex.quote(str(python_bin))} {shlex.quote((BASE_DIR / 'app.py').as_posix())} "
         "--update-remote-rules >> /proc/1/fd/1 2>> /proc/1/fd/2"
-    )
+    ).replace("%", r"\%")
+    job = f"{schedule} root {command}"
     return "\n".join(env_lines + [job, ""])
 
 
-def sync_cron_file(config):
-    if os.name == "nt":
+def sync_cron_file(config, *, force=False):
+    if os.name == "nt" and not force:
         return None
 
     content = build_cron_content(config)
-    CRON_FILE.write_text(content, encoding="utf-8")
+    write_text_file_atomic(CRON_FILE, content)
     CRON_FILE.chmod(0o644)
     return str(CRON_FILE)
+
+
+def sync_cron_file_safe(*, force=False):
+    """Initialize crontab on container startup without failing on malformed config."""
+    try:
+        config = load_config()
+        return sync_cron_file(config, force=force)
+    except (ValueError, OSError) as error:
+        print(f"Warning: invalid cron configuration ({error}); disabling auto-update.", file=sys.stderr)
+        fallback = dict(DEFAULT_CONFIG)
+        fallback["auto_update_enabled"] = False
+        return sync_cron_file(fallback, force=force)
 
 
 def load_rules_dat_rule(kind, code, line_number=None):
@@ -1182,7 +1210,7 @@ def convert_to_singbox_json(rule_lines):
             continue
 
         if is_plain_domain(line):
-            domain_keyword.append(line.rstrip("."))
+            domain_suffix.append(line.lstrip(".").rstrip("."))
             continue
 
         parsed_ip_cidr = parse_plain_ip_cidr(line)
@@ -1373,8 +1401,8 @@ def convert_to_openclash_yaml(rule_lines, rule_target=None):
             append_openclash_rule(
                 payload,
                 seen,
-                "DOMAIN-KEYWORD",
-                line.rstrip("."),
+                "DOMAIN-SUFFIX",
+                line.lstrip(".").rstrip("."),
                 options=openclash_rule_options(rule_target),
             )
             continue
@@ -1572,31 +1600,23 @@ def generate_rule_by_name(name, ensure_remote_rules=True):
         }
 
 
-def generate_all_rules():
+def generate_all_rules(ensure_remote_rules=True):
     results = []
     rules = list_rules()
     _, ip_skip_rules = get_merged_rule_names(rules)
     generated_rules = [rule for rule in rules if rule["name"] not in ip_skip_rules]
-    required_geo_rules = {
-        "geosite": set(),
-        "geoip": set(),
-    }
+    remote_update_result = None
 
-    for rule in rules:
-        rule_required = collect_geo_rules_from_lines(rule["content"].splitlines())
-        for kind in required_geo_rules:
-            required_geo_rules[kind].update(rule_required[kind])
-
-    remote_update_result = ensure_required_geo_rules(required_geo_rules, load_config())
-    if not remote_update_result["ok"]:
-        return {
-            "ok": False,
-            "total": len(generated_rules),
-            "success_count": 0,
-            "failure_count": len(generated_rules),
-            "results": [],
-            "remote_update": remote_update_result,
+    if ensure_remote_rules:
+        required_geo_rules = {
+            "geosite": set(),
+            "geoip": set(),
         }
+        for rule in rules:
+            rule_required = collect_geo_rules_from_lines(rule["content"].splitlines())
+            for kind in required_geo_rules:
+                required_geo_rules[kind].update(rule_required[kind])
+        remote_update_result = ensure_required_geo_rules(required_geo_rules, load_config())
 
     for rule in generated_rules:
         try:
@@ -1614,7 +1634,7 @@ def generate_all_rules():
     success_count = sum(1 for result in results if result.get("ok"))
     failure_count = len(results) - success_count
     return {
-        "ok": failure_count == 0,
+        "ok": failure_count == 0 and (remote_update_result is None or remote_update_result["ok"]),
         "total": len(results),
         "success_count": success_count,
         "failure_count": failure_count,
@@ -2406,15 +2426,46 @@ def read_template(template_path=None):
     }
 
 
+def validate_direct_port(entry):
+    if isinstance(entry, bool):
+        raise ValueError("ports.json 中端口不能是布尔值。")
+    if isinstance(entry, int):
+        if not 1 <= entry <= 65535:
+            raise ValueError(f"ports.json 中端口超出范围（1-65535）：{entry}。")
+        return str(entry)
+    if isinstance(entry, str):
+        text = entry.strip()
+        if text and re.fullmatch(r"\d{1,5}(?:[-/]\d{1,5})*", text):
+            for part in text.split("/"):
+                if "-" in part:
+                    bounds = part.split("-")
+                    if len(bounds) != 2:
+                        raise ValueError(f"ports.json 中端口范围格式无效：{entry}。")
+                    start, end = int(bounds[0]), int(bounds[1])
+                    if not (1 <= start <= end <= 65535):
+                        raise ValueError(f"ports.json 中端口范围无效：{entry}。")
+                else:
+                    port = int(part)
+                    if not 1 <= port <= 65535:
+                        raise ValueError(f"ports.json 中端口超出范围（1-65535）：{entry}。")
+            return text
+    raise ValueError(f"ports.json 中包含无效端口配置：{entry!r}。")
+
+
 def load_ports_config():
-    """Read ports.json and return list of direct port ranges."""
+    """Read ports.json and return validated list of direct port ranges."""
     if not PORTS_PATH.exists():
         return []
     try:
-        data = json.loads(PORTS_PATH.read_text(encoding="utf-8"))
-        return data.get("direct_ports", [])
-    except (json.JSONDecodeError, OSError):
-        return []
+        data = json.loads(PORTS_PATH.read_text(encoding="utf-8-sig"))
+    except (ValueError, OSError) as error:
+        raise ValueError("无法读取 ports.json，请检查文件和 JSON 格式。") from error
+    if not isinstance(data, dict):
+        raise ValueError("ports.json 顶层必须是 JSON 对象。")
+    direct_ports = data.get("direct_ports", [])
+    if not isinstance(direct_ports, list):
+        raise ValueError("ports.json 中 direct_ports 必须是数组。")
+    return [validate_direct_port(item) for item in direct_ports]
 
 
 def generate_rules_yaml(rule_mapping, custom_rules, direct_ports=None, rule_snapshot=None, converted_rules=None):
@@ -2440,25 +2491,29 @@ def generate_rules_yaml(rule_mapping, custom_rules, direct_ports=None, rule_snap
 
     # BT/PT direct ports from ports.json
     if direct_ports:
+        direct_target = rule_mapping.get("Direct", "DIRECT")
         for port_range in direct_ports:
-            lines.append(f"  - {dump_yaml_value(f'DST-PORT,{port_range},Direct')}")
+            lines.append(f"  - {dump_yaml_value(f'DST-PORT,{port_range},{direct_target}')}")
 
     # Inline rules from each mapped rule file (in template definition order)
     for rule_name, proxy_group in rule_mapping.items():
-        try:
-            if converted_rules is not None:
-                payload = [target_openclash_rule(item, proxy_group) for item in converted_rules[rule_name]]
+        if converted_rules is not None:
+            if rule_name not in converted_rules:
+                continue
+            payload = [target_openclash_rule(item, proxy_group) for item in converted_rules[rule_name]]
+        else:
+            if rule_snapshot is not None:
+                if rule_name not in rule_snapshot and f"{rule_name}IP" not in rule_snapshot:
+                    continue
+                rule_lines = get_snapshot_rule_lines(rule_name, rule_snapshot)
             else:
-                if rule_snapshot is not None:
-                    rule_lines = get_snapshot_rule_lines(rule_name, rule_snapshot)
-                else:
+                try:
                     _, _, rule_lines = load_rule_lines_with_merged_ip(rule_name)
-                payload = convert_to_openclash_yaml(rule_lines, rule_target=proxy_group)["payload"]
-            for item in payload:
-                lines.append(f"  - {dump_yaml_value(item)}")
-        except (OSError, ValueError):
-            # Skip rules that can't be read
-            pass
+                except FileNotFoundError:
+                    continue
+            payload = convert_to_openclash_yaml(rule_lines, rule_target=proxy_group)["payload"]
+        for item in payload:
+            lines.append(f"  - {dump_yaml_value(item)}")
 
     # MATCH rules at the very end (catch-all)
     for rule in match_rules:
@@ -2934,8 +2989,8 @@ def generate_full_openclash_config(rules_list=None, converted_rules=None):
 
     # Step 3: Render OpenClash template
     proxy_providers_yaml = generate_proxy_providers_yaml(providers, global_ua) if providers else ""
-    direct_ports = load_ports_config()
     try:
+        direct_ports = load_ports_config()
         full_yaml, rule_mapping = expand_clash_template(
             template,
             effective_names=effective_names,
@@ -2996,13 +3051,10 @@ def generate_full_openclash_config(rules_list=None, converted_rules=None):
 
 def update_remote_rules_and_generate(config=None):
     remote_result = update_remote_rules(config)
-    generate_result = None
-
-    if remote_result["ok"]:
-        generate_result = generate_all_rules()
+    generate_result = generate_all_rules(ensure_remote_rules=False)
 
     return {
-        "ok": remote_result["ok"] and (generate_result is None or generate_result["ok"]),
+        "ok": remote_result["ok"] and generate_result["ok"],
         "remote_update": remote_result,
         "generate_all": generate_result,
     }
@@ -3392,7 +3444,16 @@ def main(argv=None):
         action="store_true",
         help="Download remote sing-box geosite and geoip JSON rule files, generate all rule sets, then exit.",
     )
+    parser.add_argument(
+        "--sync-cron",
+        action="store_true",
+        help="Synchronize crontab file from current configuration and exit.",
+    )
     args = parser.parse_args(argv)
+
+    if args.sync_cron:
+        sync_cron_file_safe()
+        return 0
 
     if args.update_remote_rules:
         result = update_remote_rules_and_generate(load_config())

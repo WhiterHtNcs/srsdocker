@@ -493,6 +493,7 @@
         <button id="reloadConfigBtn" class="secondary" type="button">重新加载</button>
         <button id="remoteUpdateBtn" class="secondary" type="button">同步已引用 JSON 规则</button>
       </div>
+      <div id="configStatus" class="status" role="status" aria-live="polite"></div>
       <pre id="remoteOutput">尚未同步</pre>
     </section>
 
@@ -555,6 +556,10 @@
     const githubTokenStatus = document.querySelector("#githubTokenStatus");
     const autoUpdateEnabled = document.querySelector("#autoUpdateEnabled");
     const autoUpdateCron = document.querySelector("#autoUpdateCron");
+    const configStatus = document.querySelector("#configStatus");
+    const saveConfigBtn = document.querySelector("#saveConfigBtn");
+    const reloadConfigBtn = document.querySelector("#reloadConfigBtn");
+    const remoteUpdateBtn = document.querySelector("#remoteUpdateBtn");
     const remoteOutput = document.querySelector("#remoteOutput");
     const urlTestUrl = document.querySelector("#urlTestUrl");
     const urlTestInterval = document.querySelector("#urlTestInterval");
@@ -592,6 +597,10 @@
 
     function setStatus(message) {
       statusText.textContent = message;
+    }
+
+    function setConfigStatus(message) {
+      configStatus.textContent = message;
     }
 
     function setSubscribeStatus(message) {
@@ -684,9 +693,14 @@
         payload.github_token = githubToken.value;
       }
 
-      const result = await postJson("/api/config", payload);
-      setStatus(`配置已保存到 ${result.config_path || "config.json"}。`);
-      await loadConfig();
+      saveConfigBtn.disabled = true;
+      try {
+        const result = await postJson("/api/config", payload);
+        setConfigStatus(`配置已保存到 ${result.config_path || "config.json"}。`);
+        await loadConfig();
+      } finally {
+        saveConfigBtn.disabled = false;
+      }
     }
 
     async function saveUrlTestConfig() {
@@ -705,10 +719,15 @@
     }
 
     async function updateRemoteRules() {
-      setStatus("正在同步规则集中引用的远程 JSON 规则...");
-      const result = await postJson("/api/remote/update", {});
-      showRemoteResult(result);
-      setStatus(result.ok ? "已引用的远程 JSON 规则已同步。" : "远程 JSON 规则同步失败。");
+      setConfigStatus("正在同步规则集中引用的远程 JSON 规则...");
+      remoteUpdateBtn.disabled = true;
+      try {
+        const result = await postJson("/api/remote/update", {});
+        showRemoteResult(result);
+        setConfigStatus(result.ok ? "已引用的远程 JSON 规则已同步。" : "部分或全部远程 JSON 规则同步失败，请查看下方详情。");
+      } finally {
+        remoteUpdateBtn.disabled = false;
+      }
     }
 
     function formatUserAgent(value) {
@@ -1193,16 +1212,16 @@
       }
     }
 
-    document.querySelector("#saveConfigBtn").addEventListener("click", () => {
-      saveConfig().catch((error) => setStatus(error.message));
+    saveConfigBtn.addEventListener("click", () => {
+      saveConfig().catch((error) => setConfigStatus(error.message));
     });
 
-    document.querySelector("#reloadConfigBtn").addEventListener("click", () => {
-      loadConfig().then(() => setStatus("配置已重新加载。")).catch((error) => setStatus(error.message));
+    reloadConfigBtn.addEventListener("click", () => {
+      loadConfig().then(() => setConfigStatus("配置已重新加载。")).catch((error) => setConfigStatus(error.message));
     });
 
-    document.querySelector("#remoteUpdateBtn").addEventListener("click", () => {
-      updateRemoteRules().catch((error) => setStatus(error.message));
+    remoteUpdateBtn.addEventListener("click", () => {
+      updateRemoteRules().catch((error) => setConfigStatus(error.message));
     });
 
     saveUrlTestBtn.addEventListener("click", () => {

@@ -55,6 +55,25 @@ class AsnRuleTests(unittest.TestCase):
         self.assertEqual(app.convert_to_singbox_json(["keyword:AS399358"])["rules"],
                          [{"domain_keyword": ["AS399358"]}])
 
+    def test_bare_domain_uses_domain_suffix_while_bare_word_stays_keyword(self):
+        lines = ["t.co", ".syncthing.net.", "keyword:t.co", "syncthing"]
+        self.assertEqual(
+            app.convert_to_openclash_yaml(lines, rule_target="Proxy")["payload"],
+            [
+                "DOMAIN-SUFFIX,t.co,Proxy",
+                "DOMAIN-SUFFIX,syncthing.net,Proxy",
+                "DOMAIN-KEYWORD,t.co,Proxy",
+                "DOMAIN-KEYWORD,syncthing,Proxy",
+            ],
+        )
+        self.assertEqual(
+            app.convert_to_singbox_json(lines)["rules"],
+            [{
+                "domain_suffix": ["t.co", "syncthing.net"],
+                "domain_keyword": ["t.co", "syncthing"],
+            }],
+        )
+
     def test_companion_aiip_rules_route_asn_to_ai_and_skip_it_for_srs(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

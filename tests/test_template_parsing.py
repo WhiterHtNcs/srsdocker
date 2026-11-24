@@ -359,7 +359,7 @@ custom_rules:
         self.assertEqual(reads, {"Direct.txt": 1, "DirectIP.txt": 1, "AI.txt": 1, "AIIP.txt": 1})
         generated = yaml.safe_load((app.OPENCLASH_DIR / app.OPENCLASH_ALL_FILENAME).read_text(encoding="utf-8"))
         self.assertEqual(generated["rules"], [
-            "DST-PORT,53,DIRECT", "DST-PORT,5000-5010,Direct", "DOMAIN-KEYWORD,openai,Proxy",
+            "DST-PORT,53,DIRECT", "DST-PORT,5000-5010,DIRECT", "DOMAIN-KEYWORD,openai,Proxy",
             "IP-ASN,399358,Proxy", "IP-CIDR6,2001:db8::/32,Proxy,no-resolve",
             "DOMAIN-SUFFIX,example.com,DIRECT", "IP-CIDR,198.51.100.0/24,DIRECT,no-resolve",
             "GEOIP,CN,DIRECT,no-resolve", "MATCH,DIRECT",
@@ -425,6 +425,75 @@ custom_rules:
         self.assertTrue(result["full_config"]["ok"], result["full_config"])
         generated = yaml.safe_load((app.OPENCLASH_DIR / app.OPENCLASH_ALL_FILENAME).read_text(encoding="utf-8"))
         self.assertEqual(generated["rules"], ["DOMAIN-SUFFIX,example.com,DIRECT", "MATCH,DIRECT"])
+
+    def test_ports_config_validates_entries_and_uses_mapped_direct_target(self):
+        self.write_template("rule_mapping: {Direct: Proxy}\ncustom_rules: ['MATCH,DIRECT']\n")
+        app.PORTS_PATH.write_text('{"direct_ports": [22223, "6881-6889", "80/443"]}', encoding="utf-8")
+        result = app.generate_full_openclash_config()
+        self.assertTrue(result["ok"], result)
+        output = app.OPENCLASH_DIR / app.OPENCLASH_ALL_FILENAME
+        generated = yaml.safe_load(output.read_text(encoding="utf-8"))
+        self.assertEqual(generated["rules"], [
+            "DST-PORT,22223,Proxy",
+            "DST-PORT,6881-6889,Proxy",
+            "DST-PORT,80/443,Proxy",
+            "DOMAIN-SUFFIX,example.com,Proxy",
+            "MATCH,DIRECT",
+        ])
+        previous = output.read_text(encoding="utf-8")
+        for bad_ports in ('{bad json', '{"direct_ports": [true]}', '{"direct_ports": [70000]}', '{"direct_ports": ["9000-8000"]}'):
+            app.PORTS_PATH.write_text(bad_ports, encoding="utf-8")
+            failed = app.generate_full_openclash_config()
+            self.assertFalse(failed["ok"])
+            self.assertEqual(output.read_text(encoding="utf-8"), previous)
+
+    def test_standalone_full_config_fails_instead_of_dropping_invalid_rule_file(self):
+        self.write_template("rule_mapping: {Direct: DIRECT}\ncustom_rules: ['MATCH,DIRECT']\n")
+        (app.RULES_DIR / "Direct.txt").write_text("ipasn:invalid\n", encoding="utf-8")
+        output = app.OPENCLASH_DIR / app.OPENCLASH_ALL_FILENAME
+        output.write_text("previous full config", encoding="utf-8")
+        result = app.generate_full_openclash_config()
+        self.assertFalse(result["ok"])
+        self.assertEqual(output.read_text(encoding="utf-8"), "previous full config")
+
+    def test_generate_all_rules_isolates_missing_remote_geo_rule(self):
+        rules_dat = app.BASE_DIR / "rules-dat"
+        (rules_dat / "geosite").mkdir(parents=True)
+        (rules_dat / "geoip").mkdir(parents=True)
+        srs_dir = app.BASE_DIR / "rule-set" / "srs"
+        srs_dir.mkdir(parents=True)
+        (app.RULES_DIR / "Broken.txt").write_text("geosite:nonexistent\n", encoding="utf-8")
+        fake_remote = {"ok": False, "results": {"geosite": {"ok": False}, "geoip": {"ok": True}}}
+        with patch.object(app, "RULES_DAT_DIR", rules_dat), \
+             patch.object(app, "RULE_SET_DIR", srs_dir.parent), \
+             patch.object(app, "SRS_DIR", srs_dir), \
+             patch.object(app, "ensure_required_geo_rules", return_value=fake_remote), \
+             patch.object(app, "compile_singbox_json_to_srs", return_value={"content": b"SRS-DATA", "returncode": 0}):
+            result = app.generate_all_rules()
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["success_count"], 1)
+        self.assertEqual(result["failure_count"], 1)
+        self.assertTrue((srs_dir / "Direct.srs").is_file())
+        self.assertFalse((srs_dir / "Broken.srs").exists())
+
+    def test_cron_content_escapes_percent_and_quotes_and_safe_sync_recovers(self):
+        cron_file = app.BASE_DIR / "cron-test"
+        env = {
+            "GEOSITE_URL": 'https://example.com/geo%20site?q="1"',
+            "PYTHON_BIN": "/opt/py bin/python3",
+        }
+        with patch.dict("os.environ", env, clear=False), \
+             patch.object(app, "BASE_DIR", Path("/srv/app%dir")):
+            content = app.build_cron_content({"auto_update_enabled": True, "auto_update_cron": "5 4 * * *"})
+        self.assertIn("""GEOSITE_URL='https://example.com/geo%20site?q="1"'""", content)
+        self.assertIn(r"/srv/app\%dir", content)
+        self.assertIn("'/opt/py bin/python3'", content)
+
+        app.CONFIG_PATH.write_text('{"auto_update_enabled": true, "auto_update_cron": "bad cron"}', encoding="utf-8")
+        with patch.object(app, "CRON_FILE", cron_file), patch.object(Path, "chmod"):
+            synced = app.sync_cron_file_safe(force=True)
+        self.assertEqual(synced, str(cron_file))
+        self.assertIn("disabled", cron_file.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":
