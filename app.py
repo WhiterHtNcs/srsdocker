@@ -4,6 +4,10 @@
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 import argparse
+import base64
+from concurrent.futures import ThreadPoolExecutor
+import hashlib
+import hmac
 import json
 import os
 from pathlib import Path
@@ -47,6 +51,10 @@ CRON_FILE = Path(os.environ.get("CRON_FILE", "/etc/cron.d/singbox-srs-generator"
 APP_PORT = 9044
 MAX_JSON_BODY_BYTES = 1024 * 1024
 MAX_SUBSCRIPTION_BYTES = 10 * 1024 * 1024
+MAX_REMOTE_RULE_BYTES = 50 * 1024 * 1024
+MAX_REMOTE_JSON_BYTES = 20 * 1024 * 1024
+REMOTE_DOWNLOAD_WORKERS = 6
+DNS_FETCH_WORKERS = 4
 DEFAULT_RESIDENTIAL_FILTER = {"keywords": ["家宽"]}
 
 CONFIG_LOCK = threading.RLock()
@@ -160,29 +168,57 @@ def apply_environment_overrides(config):
     return config
 
 
+def write_text_file_atomic(output_path, content, *, newline=None):
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_fd, temp_name = tempfile.mkstemp(
+        prefix=f".{output_path.name}.",
+        suffix=".tmp",
+        dir=str(output_path.parent),
+    )
+    os.close(temp_fd)
+    temp_path = Path(temp_name)
+
+    try:
+        temp_path.write_text(content, encoding="utf-8", newline=newline)
+        os.replace(temp_path, output_path)
+    finally:
+        try:
+            if temp_path.exists():
+                temp_path.unlink()
+        except OSError:
+            pass
+
+
+def write_bytes_file_atomic(output_path, data):
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_fd, temp_name = tempfile.mkstemp(
+        prefix=f".{output_path.name}.",
+        suffix=".tmp",
+        dir=str(output_path.parent),
+    )
+    os.close(temp_fd)
+    temp_path = Path(temp_name)
+
+    try:
+        temp_path.write_bytes(data)
+        os.replace(temp_path, output_path)
+    finally:
+        try:
+            if temp_path.exists():
+                temp_path.unlink()
+        except OSError:
+            pass
+
+
 def save_config(config):
     with CONFIG_LOCK:
         config = dict(config)
-        CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        temp_fd, temp_name = tempfile.mkstemp(
-            prefix=f".{CONFIG_PATH.name}.",
-            suffix=".tmp",
-            dir=str(CONFIG_PATH.parent),
+        write_text_file_atomic(
+            CONFIG_PATH,
+            json.dumps(config, indent=2, ensure_ascii=False) + "\n",
         )
-        os.close(temp_fd)
-        temp_path = Path(temp_name)
-
-        try:
-            with temp_path.open("w", encoding="utf-8") as file:
-                json.dump(config, file, indent=2, ensure_ascii=False)
-                file.write("\n")
-            os.replace(temp_path, CONFIG_PATH)
-        finally:
-            try:
-                if temp_path.exists():
-                    temp_path.unlink()
-            except OSError:
-                pass
 
 
 def public_config(config):
@@ -279,7 +315,7 @@ def get_rules_dat_json_path(kind, code):
 
 
 def read_rule_order():
-    with CONFIG_LOCK:
+    with RULES_LOCK:
         if not ORDER_PATH.exists():
             return []
 
@@ -326,7 +362,7 @@ def save_rule_order(filenames):
 
     content = json.dumps(normalized, ensure_ascii=False, indent=2) + "\n"
 
-    with CONFIG_LOCK:
+    with RULES_LOCK:
         if ORDER_PATH.exists() and read_rule_order() == normalized:
             return normalized
         ORDER_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -471,23 +507,7 @@ def write_srs_files_index():
         content += "\n"
 
     index_path = SRS_DIR / "files.txt"
-    temp_fd, temp_name = tempfile.mkstemp(
-        prefix=f".{index_path.name}.",
-        suffix=".tmp",
-        dir=str(SRS_DIR),
-    )
-    os.close(temp_fd)
-    temp_path = Path(temp_name)
-
-    try:
-        temp_path.write_text(content, encoding="utf-8")
-        os.replace(temp_path, index_path)
-    finally:
-        try:
-            if temp_path.exists():
-                temp_path.unlink()
-        except OSError:
-            pass
+    write_text_file_atomic(index_path, content)
 
     return {
         "path": str(index_path.relative_to(BASE_DIR)),
@@ -597,7 +617,7 @@ def validate_cron_expression(expression):
     return " ".join(fields)
 
 
-def download_file(url, output_path, timeout=60, github_token=None):
+def download_file(url, output_path, timeout=60, github_token=None, max_bytes=MAX_REMOTE_RULE_BYTES):
     url = validate_download_url(url)
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -609,16 +629,21 @@ def download_file(url, output_path, timeout=60, github_token=None):
 
     try:
         request = urllib.request.Request(url, headers=build_download_headers(github_token))
+        total_bytes = 0
         with urllib.request.urlopen(request, timeout=timeout) as response:
             with temp_path.open("wb") as file:
                 while True:
-                    chunk = response.read(1024 * 1024)
+                    chunk = response.read(min(1024 * 1024, max_bytes - total_bytes + 1))
                     if not chunk:
                         break
+                    total_bytes += len(chunk)
+                    if total_bytes > max_bytes:
+                        raise ValueError(f"Downloaded file exceeds size limit ({max_bytes} bytes).")
                     file.write(chunk)
 
-        os.replace(temp_path, output_path)
-        stat = output_path.stat()
+        with RULES_DAT_LOCK:
+            os.replace(temp_path, output_path)
+            stat = output_path.stat()
         return {
             "ok": True,
             "url": url,
@@ -647,14 +672,17 @@ def build_download_headers(github_token=None, accept="application/json"):
     return headers
 
 
-def load_remote_json(url, github_token=None, timeout=60):
+def load_remote_json(url, github_token=None, timeout=60, max_bytes=MAX_REMOTE_JSON_BYTES):
     url = validate_download_url(url)
     request = urllib.request.Request(
         url,
         headers=build_download_headers(github_token, accept="application/vnd.github+json, application/json"),
     )
     with urllib.request.urlopen(request, timeout=timeout) as response:
-        return json.loads(response.read().decode("utf-8"))
+        raw = response.read(max_bytes + 1)
+    if len(raw) > max_bytes:
+        raise ValueError(f"Remote JSON response exceeds size limit ({max_bytes} bytes).")
+    return json.loads(raw.decode("utf-8"))
 
 
 def normalize_rules_dat_listing_url(url, kind):
@@ -903,6 +931,91 @@ def ensure_required_geo_rules(required, config=None):
     return update_remote_rules(config=config, required=required, missing_only=True)
 
 
+def compute_git_blob_sha(path):
+    try:
+        raw = Path(path).read_bytes()
+    except OSError:
+        return None
+    header = f"blob {len(raw)}\x00".encode("ascii")
+    return hashlib.sha1(header + raw).hexdigest()
+
+
+def try_load_rules_dat_listing_index(base_url, kind, github_token=None):
+    """Fetch GitHub directory listing once to avoid N per-file metadata API calls.
+
+    Returns (index_by_code, is_complete_listing), or (None, False) when the base
+    URL is not a GitHub directory listing or the listing call fails.
+    """
+    try:
+        listing_url = normalize_rules_dat_listing_url(base_url, kind)
+    except ValueError:
+        return None, False
+    parsed = urlparse(listing_url)
+    if parsed.netloc.lower() != "api.github.com" or "/contents/" not in parsed.path or parsed.path.endswith(".json"):
+        return None, False
+    try:
+        listing = load_remote_json(listing_url, github_token=github_token)
+    except (ValueError, OSError, urllib.error.URLError, TimeoutError, json.JSONDecodeError):
+        return None, False
+    if not isinstance(listing, list):
+        return None, False
+
+    index = {}
+    for item in listing:
+        if not isinstance(item, dict) or item.get("type") != "file":
+            continue
+        name = item.get("name", "")
+        download_url = item.get("download_url")
+        if not isinstance(name, str) or not name.endswith(".json") or not download_url:
+            continue
+        try:
+            code = normalize_geo_code(name[:-5])
+        except ValueError:
+            continue
+        index[code] = {
+            "download_url": download_url,
+            "sha": item.get("sha") if isinstance(item.get("sha"), str) else None,
+            "url": item.get("url") or listing_url,
+        }
+    # GitHub's Contents API caps directory listings at 1,000 entries.
+    return index, len(listing) < 1000
+
+
+def _sync_single_remote_rule(base_url, kind, code, *, github_token=None, listing_index=None, listing_complete=False, missing_only=False):
+    normalized_code, output_path = get_rules_dat_json_path(kind, code)
+    if listing_index is not None:
+        entry = listing_index.get(normalized_code)
+        if entry is not None:
+            remote_sha = entry.get("sha")
+            if not missing_only and remote_sha:
+                with RULES_DAT_LOCK:
+                    up_to_date = (
+                        rules_dat_rule_is_complete(kind, normalized_code)
+                        and compute_git_blob_sha(output_path) == remote_sha
+                    )
+                if up_to_date:
+                    return ("unchanged", {"name": normalized_code, "filename": output_path.name, "sha": remote_sha})
+            result = download_file(entry["download_url"], output_path, github_token=github_token)
+            return (
+                "downloaded",
+                {
+                    "ok": True,
+                    "kind": kind,
+                    "name": normalized_code,
+                    "filename": output_path.name,
+                    "url": entry["url"],
+                    "download_url": entry["download_url"],
+                    "path": str(output_path),
+                    "size": result["size"],
+                    "elapsed_seconds": result["elapsed_seconds"],
+                },
+            )
+        if listing_complete:
+            return ("skipped", {"name": normalized_code, "error": "remote JSON rule not found"})
+
+    return ("downloaded", download_rules_dat_rule_file(base_url, kind, normalized_code, github_token=github_token))
+
+
 def _update_remote_rules(config=None, required=None, missing_only=False):
     config = config or load_config()
     github_token = config.get("github_token", "")
@@ -917,6 +1030,7 @@ def _update_remote_rules(config=None, required=None, missing_only=False):
     for name, config_key in targets.items():
         codes = sorted((missing if missing_only else required)[name])
         downloaded = []
+        unchanged = []
         failed = []
         skipped = []
         started_at = time.time()
@@ -928,9 +1042,11 @@ def _update_remote_rules(config=None, required=None, missing_only=False):
                 "needed_count": len(required.get(name, [])),
                 "download_needed_count": 0,
                 "downloaded_count": 0,
+                "unchanged_count": 0,
                 "failed_count": 0,
                 "skipped_count": 0,
                 "downloaded": [],
+                "unchanged": [],
                 "failed": [],
                 "skipped": [],
                 "elapsed_seconds": 0,
@@ -938,33 +1054,44 @@ def _update_remote_rules(config=None, required=None, missing_only=False):
             continue
 
         try:
-            base_url = config.get(config_key, "")
-            with RULES_DAT_LOCK:
-                for code in codes:
-                    try:
-                        downloaded.append(download_rules_dat_rule_file(base_url, name, code, github_token=github_token))
-                    except urllib.error.HTTPError as error:
-                        if error.code == 404:
-                            skipped.append(
-                                {
-                                    "name": code,
-                                    "error": "remote JSON rule not found",
-                                }
-                            )
-                        else:
-                            failed.append(
-                                {
-                                    "name": code,
-                                    "error": str(error),
-                                }
-                            )
-                    except (ValueError, OSError, urllib.error.URLError, TimeoutError, json.JSONDecodeError) as error:
-                        failed.append(
-                            {
-                                "name": code,
-                                "error": str(error),
-                            }
-                        )
+            base_url = validate_download_url(config.get(config_key, ""))
+            listing_index, listing_complete = try_load_rules_dat_listing_index(
+                base_url, name, github_token=github_token
+            )
+
+            def sync_code(code):
+                try:
+                    return _sync_single_remote_rule(
+                        base_url,
+                        name,
+                        code,
+                        github_token=github_token,
+                        listing_index=listing_index,
+                        listing_complete=listing_complete,
+                        missing_only=missing_only,
+                    )
+                except urllib.error.HTTPError as error:
+                    if error.code == 404:
+                        return ("skipped", {"name": code, "error": "remote JSON rule not found"})
+                    return ("failed", {"name": code, "error": str(error)})
+                except (ValueError, OSError, urllib.error.URLError, TimeoutError, json.JSONDecodeError) as error:
+                    return ("failed", {"name": code, "error": str(error)})
+
+            if len(codes) == 1:
+                outcomes = [sync_code(codes[0])]
+            else:
+                with ThreadPoolExecutor(max_workers=min(REMOTE_DOWNLOAD_WORKERS, len(codes))) as pool:
+                    outcomes = list(pool.map(sync_code, codes))
+
+            for status, payload in outcomes:
+                if status == "downloaded":
+                    downloaded.append(payload)
+                elif status == "unchanged":
+                    unchanged.append(payload)
+                elif status == "skipped":
+                    skipped.append(payload)
+                else:
+                    failed.append(payload)
 
             results[name] = {
                 "ok": not failed and not skipped,
@@ -974,9 +1101,11 @@ def _update_remote_rules(config=None, required=None, missing_only=False):
                 "needed_count": len(required.get(name, [])),
                 "download_needed_count": len(codes),
                 "downloaded_count": len(downloaded),
+                "unchanged_count": len(unchanged),
                 "failed_count": len(failed),
                 "skipped_count": len(skipped),
                 "downloaded": downloaded,
+                "unchanged": unchanged,
                 "failed": failed,
                 "skipped": skipped,
                 "elapsed_seconds": round(time.time() - started_at, 3),
@@ -990,9 +1119,11 @@ def _update_remote_rules(config=None, required=None, missing_only=False):
                 "needed_count": len(required.get(name, [])),
                 "download_needed_count": len(codes),
                 "downloaded_count": len(downloaded),
+                "unchanged_count": len(unchanged),
                 "failed_count": len(failed) + 1,
                 "skipped_count": len(skipped),
                 "downloaded": downloaded,
+                "unchanged": unchanged,
                 "failed": failed + [{"error": str(error)}],
                 "skipped": skipped,
                 "elapsed_seconds": round(time.time() - started_at, 3),
@@ -1286,28 +1417,6 @@ def dump_yaml_value(value):
     return json.dumps(value, ensure_ascii=False)
 
 
-def write_text_file_atomic(output_path, content, *, newline=None):
-    output_path = Path(output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    temp_fd, temp_name = tempfile.mkstemp(
-        prefix=f".{output_path.name}.",
-        suffix=".tmp",
-        dir=str(output_path.parent),
-    )
-    os.close(temp_fd)
-    temp_path = Path(temp_name)
-
-    try:
-        temp_path.write_text(content, encoding="utf-8", newline=newline)
-        os.replace(temp_path, output_path)
-    finally:
-        try:
-            if temp_path.exists():
-                temp_path.unlink()
-        except OSError:
-            pass
-
-
 def openclash_rule_options(rule_target=None, no_resolve=False):
     options = []
     if rule_target:
@@ -1554,37 +1663,12 @@ def generate_rule_by_name(name, ensure_remote_rules=True):
         srs_result = compile_singbox_json_to_srs(singbox_json)
         srs_content = srs_result.pop("content")
 
-        json_fd, temp_json_name = tempfile.mkstemp(
-            prefix=f".{json_path.name}.",
-            suffix=".tmp",
-            dir=str(json_path.parent),
+        write_text_file_atomic(
+            json_path,
+            json.dumps(singbox_json, ensure_ascii=False, indent=2) + "\n",
         )
-        srs_fd, temp_srs_name = tempfile.mkstemp(
-            prefix=f".{srs_path.name}.",
-            suffix=".tmp",
-            dir=str(srs_path.parent),
-        )
-        os.close(json_fd)
-        os.close(srs_fd)
-        temp_json_path = Path(temp_json_name)
-        temp_srs_path = Path(temp_srs_name)
-
-        try:
-            temp_json_path.write_text(
-                json.dumps(singbox_json, ensure_ascii=False, indent=2) + "\n",
-                encoding="utf-8",
-            )
-            temp_srs_path.write_bytes(srs_content)
-            os.replace(temp_json_path, json_path)
-            os.replace(temp_srs_path, srs_path)
-            files_index = write_srs_files_index()
-        finally:
-            for path in (temp_json_path, temp_srs_path):
-                try:
-                    if path.exists():
-                        path.unlink()
-                except OSError:
-                    pass
+        write_bytes_file_atomic(srs_path, srs_content)
+        files_index = write_srs_files_index()
 
         return {
             "ok": True,
@@ -2025,16 +2109,30 @@ def apply_provider_dns_policy(full_yaml, providers, global_user_agent=None):
 
 
 def collect_provider_dns_policy(providers, global_user_agent=None):
-    """Collect one snapshot of the subscription DNS policies for both configurations."""
+    """Collect one snapshot of the subscription DNS policies across opted-in providers."""
     selected = [provider for provider in providers if provider.get("use_for_dns", False) is True]
     incoming = {}
     adapted = []
-    for provider in selected:
-        name = provider.get("name", "Unknown")
+    if not selected:
+        return incoming, {"dns_policy_count": 0, "dns_providers": adapted}
+
+    def fetch_one(provider):
         try:
-            policy, source_info = load_provider_dns_policy(provider, global_user_agent)
+            return load_provider_dns_policy(provider, global_user_agent), None
         except ValueError as error:
+            return None, error
+
+    if len(selected) == 1:
+        fetched = [fetch_one(selected[0])]
+    else:
+        with ThreadPoolExecutor(max_workers=min(DNS_FETCH_WORKERS, len(selected))) as pool:
+            fetched = list(pool.map(fetch_one, selected))
+
+    for provider, (loaded, error) in zip(selected, fetched):
+        name = provider.get("name", "Unknown")
+        if error is not None:
             raise ValueError(f"机场「{name}」DNS 下发失败：{error}") from error
+        policy, source_info = loaded
         for domain, resolvers in policy.items():
             if domain in incoming and set(incoming[domain]) != set(resolvers):
                 raise ValueError(f"机场「{name}」DNS 策略冲突：多个机场对同一节点域名指定了不同 DNS。")
@@ -3060,6 +3158,28 @@ def update_remote_rules_and_generate(config=None):
     }
 
 
+def verify_basic_auth_header(auth_header):
+    """Verify HTTP Basic Auth when WEB_PASSWORD is set; allow all when unset."""
+    expected_password = os.environ.get("WEB_PASSWORD", "")
+    if not expected_password:
+        return True
+    if not isinstance(auth_header, str) or not auth_header.startswith("Basic "):
+        return False
+    token = auth_header[len("Basic ") :].strip()
+    try:
+        decoded = base64.b64decode(token, validate=True).decode("utf-8")
+    except (ValueError, UnicodeDecodeError):
+        return False
+    if ":" not in decoded:
+        return False
+    username, password = decoded.split(":", 1)
+    expected_username = os.environ.get("WEB_USERNAME", "admin")
+    return (
+        hmac.compare_digest(username, expected_username)
+        and hmac.compare_digest(password, expected_password)
+    )
+
+
 class AppHandler(SimpleHTTPRequestHandler):
     server_version = "SingboxSrsGenerator/0.1"
 
@@ -3071,7 +3191,38 @@ class AppHandler(SimpleHTTPRequestHandler):
             self.send_header("Cache-Control", "no-store")
         super().end_headers()
 
+    def check_auth(self):
+        if verify_basic_auth_header(self.headers.get("Authorization")):
+            return True
+        body = json.dumps({"error": "Unauthorized"}, ensure_ascii=False).encode("utf-8")
+        self.send_response(HTTPStatus.UNAUTHORIZED)
+        self.send_header('WWW-Authenticate', 'Basic realm="singbox-srs-generator", charset="UTF-8"')
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(body)
+        return False
+
+    def list_directory(self, path):
+        self.send_json({"error": "Not found"}, status=HTTPStatus.NOT_FOUND)
+        return None
+
+    def do_HEAD(self):
+        if not self.check_auth():
+            return
+        parsed = urlparse(self.path)
+        if parsed.path == "/api" or parsed.path.startswith("/api/"):
+            self.send_response(HTTPStatus.NOT_FOUND)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        super().do_HEAD()
+
     def do_GET(self):
+        if not self.check_auth():
+            return
         parsed = urlparse(self.path)
 
         if parsed.path == "/api/config":
@@ -3101,6 +3252,10 @@ class AppHandler(SimpleHTTPRequestHandler):
             self.send_json({"rules_dat_dir": str(RULES_DAT_DIR), "files": get_remote_rule_files()})
             return
 
+        if parsed.path == "/api" or parsed.path.startswith("/api/"):
+            self.send_json({"error": "Not found"}, status=HTTPStatus.NOT_FOUND)
+            return
+
         if parsed.path in ("/", "/index.html"):
             self.path = "/index.html"
             # The frontend is an inline HTML/JS page. Always serve the current
@@ -3111,6 +3266,8 @@ class AppHandler(SimpleHTTPRequestHandler):
         super().do_GET()
 
     def do_POST(self):
+        if not self.check_auth():
+            return
         parsed = urlparse(self.path)
 
         if parsed.path == "/api/config":
@@ -3244,7 +3401,7 @@ class AppHandler(SimpleHTTPRequestHandler):
                 self.send_json({"error": "Rule already exists."}, status=HTTPStatus.CONFLICT)
                 return
 
-            rule_path.write_text(content, encoding="utf-8")
+            write_text_file_atomic(rule_path, content)
             existing = existing_rule_filenames()
             current_order = [
                 filename
@@ -3275,7 +3432,7 @@ class AppHandler(SimpleHTTPRequestHandler):
                 self.send_json({"error": "Rule not found."}, status=HTTPStatus.NOT_FOUND)
                 return
 
-            rule_path.write_text(content, encoding="utf-8")
+            write_text_file_atomic(rule_path, content)
         self.send_json({"ok": True, "rule": {"name": name, "filename": rule_path.name}})
 
     def handle_rule_delete(self):

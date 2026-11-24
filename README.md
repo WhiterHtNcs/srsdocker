@@ -16,6 +16,7 @@
   - 每条规则类别自动生成独立 select 策略组，可手动选节点
 - **远程规则同步**：按规则集中使用到的 `geosite:` / `geoip:` 下载对应 JSON
 - GitHub token 支持：通过前端配置或 Docker 环境变量 `GITHUB_TOKEN` 配置
+- 可选 Web 访问鉴权：通过环境变量 `WEB_PASSWORD`（及可选 `WEB_USERNAME`，默认 `admin`）开启 HTTP Basic Auth
 - Docker 部署：内置端口 `9044`
 - 模板解析、完整配置校验与 DNS 下发使用 PyYAML，Docker 构建时自动安装
 
