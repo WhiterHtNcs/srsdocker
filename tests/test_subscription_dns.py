@@ -316,6 +316,45 @@ class SubscriptionDnsTests(unittest.TestCase):
         self.assertEqual(app.extract_subscription_dns_policy(yaml.safe_dump(content))["node.example"],
                          ["https://node-dns.example/query"])
 
+    def test_loopback_dns_resolvers_are_filtered_and_fall_back_to_nameserver(self):
+        content = yaml.safe_load(subscription(["node.example"], [
+            "https://zone.rlose.com:39933/api-query",
+            "https://radar.rlose.com/api-query",
+        ]))
+        content["dns"]["proxy-server-nameserver"] = [
+            "udp://127.0.0.1:7874",
+            "udp://127.0.0.1:1053#DIRECT",
+            "localhost:53",
+            "[::1]:53",
+        ]
+        self.assertEqual(
+            app.extract_subscription_dns_policy(yaml.safe_dump(content))["node.example"],
+            [
+                "https://zone.rlose.com:39933/api-query",
+                "https://radar.rlose.com/api-query",
+            ],
+        )
+
+    def test_loopback_only_subscription_dns_is_rejected_and_preserves_local_cache(self):
+        bad_online = yaml.safe_dump({
+            "dns": {
+                "proxy-server-nameserver": ["udp://127.0.0.1:7874"],
+                "nameserver": ["127.0.0.1:7874", "0.0.0.0:1053"],
+            },
+            "proxies": [{"name": "n1", "type": "anytls", "server": "stale.example"}],
+        })
+        with self.assertRaisesRegex(ValueError, "本机环回地址"):
+            app.extract_subscription_dns_policy(bad_online)
+
+        path = app.get_provider_config_path(self.providers[0])
+        good_local = subscription(["good.example"], ["https://zone.rlose.com:39933/api-query"])
+        path.write_text(good_local, encoding="utf-8")
+        with patch.object(app, "download_provider_subscription", return_value=bad_online):
+            policy, info = app.load_provider_dns_policy(self.providers[0])
+        self.assertEqual(policy, {"good.example": ["https://zone.rlose.com:39933/api-query"]})
+        self.assertEqual(info["source"], "local")
+        self.assertEqual(path.read_text(encoding="utf-8"), good_local)
+
     def test_multiple_airports_only_selected_domains_are_merged(self):
         self.providers = [
             {**self.providers[0], "use_for_dns": True},

@@ -2001,6 +2001,53 @@ def get_yaml_module():
     return yaml
 
 
+def is_local_loopback_dns_resolver(resolver):
+    """Return True if a Clash/Mihomo DNS resolver points to a local loopback or unspecified address."""
+    if not isinstance(resolver, str):
+        return False
+    endpoint = resolver.strip().partition("#")[0].strip()
+    if not endpoint:
+        return False
+    host = None
+    if "://" in endpoint:
+        try:
+            host = urlparse(endpoint).hostname
+        except ValueError:
+            return False
+    else:
+        stripped = endpoint.strip("[]")
+        try:
+            ip = ipaddress.ip_address(stripped)
+            return ip.is_loopback or ip.is_unspecified
+        except ValueError:
+            pass
+        try:
+            host = urlparse(f"udp://{endpoint}").hostname
+        except ValueError:
+            return False
+    if not host:
+        return False
+    normalized_host = host.strip("[]").rstrip(".").lower()
+    if normalized_host == "localhost":
+        return True
+    try:
+        ip = ipaddress.ip_address(normalized_host)
+    except ValueError:
+        return False
+    return ip.is_loopback or ip.is_unspecified
+
+
+def extract_usable_dns_resolvers(raw_value):
+    """Normalize a DNS resolver list and drop local loopback entries like 127.0.0.1:7874."""
+    if raw_value is None:
+        return []
+    items = [raw_value] if isinstance(raw_value, str) else raw_value
+    if not isinstance(items, list) or any(not isinstance(item, str) or not item.strip() for item in items):
+        raise ValueError("订阅中没有有效的 DNS 服务器列表。")
+    cleaned = list(dict.fromkeys(item.strip() for item in items))
+    return [item for item in cleaned if not is_local_loopback_dns_resolver(item)]
+
+
 def extract_subscription_dns_policy(content):
     """Map inline node server domains to the subscription's DNS resolvers."""
     yaml = get_yaml_module()
@@ -2011,14 +2058,15 @@ def extract_subscription_dns_policy(content):
     if not isinstance(config, dict) or not isinstance(config.get("dns"), dict):
         raise ValueError("订阅中没有 DNS，请使用包含 dns 的完整 Clash/Mihomo 配置。")
     dns = config["dns"]
-    resolvers = dns.get("proxy-server-nameserver") or dns.get("nameserver")
-    if isinstance(resolvers, str):
-        resolvers = [resolvers]
-    if not isinstance(resolvers, list) or not resolvers or any(
-        not isinstance(item, str) or not item.strip() for item in resolvers
-    ):
+    raw_proxy_ns = dns.get("proxy-server-nameserver")
+    raw_ns = dns.get("nameserver")
+    resolvers = extract_usable_dns_resolvers(raw_proxy_ns) if raw_proxy_ns else []
+    if not resolvers and raw_ns:
+        resolvers = extract_usable_dns_resolvers(raw_ns)
+    if not resolvers:
+        if raw_proxy_ns or raw_ns:
+            raise ValueError("订阅 DNS 仅包含本机环回地址（如 127.0.0.1），无法用于 DNS 下发。")
         raise ValueError("订阅中没有有效的 DNS 服务器列表。")
-    resolvers = list(dict.fromkeys(item.strip() for item in resolvers))
     proxies = config.get("proxies")
     if not isinstance(proxies, list) or not proxies:
         raise ValueError("订阅中没有内联节点，无法提取节点服务器域名。")
