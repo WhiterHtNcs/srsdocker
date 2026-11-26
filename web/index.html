@@ -850,8 +850,17 @@
       useForDns.type = "checkbox";
       useForDns.checked = provider.use_for_dns === true;
       useForDns.dataset.field = "use_for_dns";
-      dnsField.title = "生成时从订阅提取节点 DNS，成功后保存为 config/机场名.yaml；在线配置不可用时读取该本地文件。";
+      dnsField.title = "生成时从订阅提取节点 DNS，成功后保存为 config/providers/机场名.yaml；在线配置不可用时读取该本地文件。";
       dnsField.append(useForDns, document.createTextNode("DNS 下发"));
+
+      const hostsField = document.createElement("label");
+      hostsField.className = "check-row";
+      const useForHosts = document.createElement("input");
+      useForHosts.type = "checkbox";
+      useForHosts.checked = provider.use_for_hosts === true;
+      useForHosts.dataset.field = "use_for_hosts";
+      hostsField.title = "生成 Clash 配置时从订阅提取节点 hosts 映射并合并到顶层 hosts，成功后保存为 config/providers/机场名.yaml；在线不可用时读取该本地文件。";
+      hostsField.append(useForHosts, document.createTextNode("Hosts 下发"));
 
       const latencyField = document.createElement("label");
       latencyField.className = "check-row";
@@ -863,7 +872,7 @@
 
       const options = document.createElement("div");
       options.className = "provider-options wide";
-      options.append(aiField, residentialField, dnsField, latencyField);
+      options.append(aiField, residentialField, dnsField, hostsField, latencyField);
       grid.append(name.field, interval.field, url.field, prefixField, options);
       card.append(heading, grid);
       return card;
@@ -924,6 +933,7 @@
         provider.use_for_ai = card.querySelector('[data-field="use_for_ai"]').checked;
         provider.use_for_residential = card.querySelector('[data-field="use_for_residential"]').checked;
         provider.use_for_dns = card.querySelector('[data-field="use_for_dns"]').checked;
+        provider.use_for_hosts = card.querySelector('[data-field="use_for_hosts"]').checked;
         provider.use_for_latency = card.querySelector('[data-field="use_for_latency"]').checked;
         provider.surfing_prefix = card.querySelector('[data-field="surfing_prefix"]:checked').value;
         return provider;
@@ -1164,11 +1174,14 @@
       try {
         const result = await postJson("/api/generate/openclash/all", {});
         showGenerateResult(result);
-        const localDnsFiles = (result.full_config?.dns_providers || [])
+        const localPolicyFiles = [...new Set([
+          ...(result.full_config?.dns_providers || []),
+          ...(result.full_config?.hosts_providers || [])
+        ]
           .filter((provider) => provider.source === "local")
-          .map((provider) => provider.file);
+          .map((provider) => provider.file))];
         const summaryDetails = result.full_config?.ok
-          ? `（${result.full_config.proxy_providers?.length || 0} 个机场订阅${result.full_config.dns_providers?.length ? `，DNS 下发 ${result.full_config.dns_policy_count} 个节点域名` : ""}${localDnsFiles.length ? `，使用本地配置：${localDnsFiles.join("、")}` : ""}）`
+          ? `（${result.full_config.proxy_providers?.length || 0} 个机场订阅${result.full_config.dns_providers?.length ? `，DNS 下发 ${result.full_config.dns_policy_count} 个节点域名` : ""}${result.full_config.hosts_providers?.length ? `，Hosts 下发 ${result.full_config.hosts_policy_count} 条` : ""}${localPolicyFiles.length ? `，使用本地配置：${localPolicyFiles.join("、")}` : ""}）`
           : "";
         const lines = [
           `Clash 生成完成：成功 ${result.success_count} 个，失败 ${result.failure_count} 个${summaryDetails}`
@@ -1241,7 +1254,7 @@
       if (empty) {
         empty.remove();
       }
-      subscriptionList.append(createProviderCard({interval: 86400, use_for_ai: true, use_for_residential: false, use_for_dns: false, use_for_latency: false}));
+      subscriptionList.append(createProviderCard({interval: 86400, use_for_ai: true, use_for_residential: false, use_for_dns: false, use_for_hosts: false, use_for_latency: false}));
       updateProviderOrderControls();
       setSubscribeStatus("请填写机场名称和订阅地址后保存。");
     });

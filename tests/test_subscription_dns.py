@@ -355,6 +355,94 @@ class SubscriptionDnsTests(unittest.TestCase):
         self.assertEqual(info["source"], "local")
         self.assertEqual(path.read_text(encoding="utf-8"), good_local)
 
+    def test_hosts_option_defaults_off_and_rejects_non_boolean(self):
+        self.assertFalse(app.validate_subscribe_data({"providers": self.providers})["providers"][0]["use_for_hosts"])
+        for value in ["true", 1, None, []]:
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "use_for_hosts"):
+                app.validate_subscribe_data({"providers": [{**self.providers[0], "use_for_hosts": value}]})
+
+    def test_hosts_policy_extracts_node_matches_and_merges_only_clash_outputs(self):
+        mobile = app.CONFIG_PATH.parent / "mobile"
+        mobile.mkdir()
+        (mobile / "surfing_template.yaml").write_text(SURFING_TEMPLATE, encoding="utf-8")
+        app.get_shadowrocket_template_path().write_text(SHADOWROCKET_TEMPLATE, encoding="utf-8")
+
+        clash_with_hosts = "hosts:\n  '*.local.test': 192.168.5.224\n" + BASE_CONFIG
+        app.TEMPLATE_PATH.write_text(clash_with_hosts, encoding="utf-8")
+        app.get_clashmihomo_template_path().write_text(BASE_CONFIG, encoding="utf-8")
+
+        ytoo_sub = yaml.safe_dump({
+            "dns": {"enable": True, "nameserver": ["https://doh.pub/dns-query"], "proxy-server-nameserver": ["udp://127.0.0.1:1053"]},
+            "hosts": {
+                "a.163cdn-agent.net": "real-a.163cdn-agent.net",
+                "unrelated.example": "192.0.2.99",
+            },
+            "proxies": [{"name": "HK 01", "type": "anytls", "server": "a.163cdn-agent.net"}],
+        })
+        self.providers = [
+            {"name": "MESL", "url": "https://mesl.example/sub", "use_for_ai": False, "use_for_dns": True, "use_for_hosts": False},
+            {"name": "YToo", "url": "https://ytoo.example/sub", "use_for_ai": False, "use_for_dns": False, "use_for_hosts": True},
+        ]
+        self.save_providers()
+
+        def fake_download(provider, _ua=None):
+            if provider["name"] == "MESL":
+                return subscription(["node.mesl.example"], ["https://zone.rlose.com:39933/api-query"])
+            return ytoo_sub
+
+        with patch.object(app, "download_provider_subscription", side_effect=fake_download) as download:
+            result = app.generate_all_openclash_rules()
+
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(download.call_count, 2)
+        fc = result["full_config"]
+        self.assertEqual(fc["hosts_policy_count"], 1)
+        self.assertEqual(fc["hosts_providers"][0]["name"], "YToo")
+
+        openclash = self.read_generated()
+        self.assertEqual(openclash["hosts"], {
+            "*.local.test": "192.168.5.224",
+            "a.163cdn-agent.net": "real-a.163cdn-agent.net",
+        })
+        self.assertEqual(openclash["dns"]["proxy-server-nameserver-policy"], {
+            "node.mesl.example": ["https://zone.rlose.com:39933/api-query"],
+        })
+
+        clashmihomo = yaml.safe_load(app.get_clashmihomo_output_path().read_text(encoding="utf-8"))
+        self.assertEqual(clashmihomo["hosts"], {"a.163cdn-agent.net": "real-a.163cdn-agent.net"})
+
+        surfing = yaml.safe_load((app.OPENCLASH_DIR.parent / "mobile" / "config.yaml").read_text(encoding="utf-8"))
+        self.assertNotIn("hosts", surfing)
+        shadowrocket = (app.OPENCLASH_DIR.parent / "mobile" / "shadowrocket.conf").read_text(encoding="utf-8")
+        self.assertNotIn("real-a.163cdn-agent.net", shadowrocket)
+
+    def test_provider_with_both_dns_and_hosts_downloads_once_and_conflicts_fail(self):
+        combined_sub = yaml.safe_dump({
+            "dns": {"enable": True, "nameserver": ["https://airport.example/dns-query"]},
+            "hosts": {"node.example": "real.example"},
+            "proxies": [{"name": "n1", "type": "anytls", "server": "node.example"}],
+        })
+        self.providers[0].update(use_for_dns=True, use_for_hosts=True)
+        self.save_providers()
+        with patch.object(app, "download_provider_subscription", return_value=combined_sub) as download:
+            result = app.generate_all_openclash_rules()
+        self.assertTrue(result["ok"], result)
+        download.assert_called_once()
+        generated = self.read_generated()
+        self.assertEqual(generated["hosts"], {"node.example": "real.example"})
+        self.assertEqual(generated["dns"]["proxy-server-nameserver-policy"], {
+            "node.example": ["https://airport.example/dns-query"],
+        })
+
+        app.TEMPLATE_PATH.write_text("hosts:\n  node.example: other.example\n" + BASE_CONFIG, encoding="utf-8")
+        output = app.OPENCLASH_DIR / app.OPENCLASH_ALL_FILENAME
+        previous = output.read_text(encoding="utf-8")
+        with patch.object(app, "download_provider_subscription", return_value=combined_sub):
+            conflict = app.generate_all_openclash_rules()
+        self.assertFalse(conflict["ok"])
+        self.assertIn("冲突", conflict["full_config"]["error"])
+        self.assertEqual(output.read_text(encoding="utf-8"), previous)
+
     def test_multiple_airports_only_selected_domains_are_merged(self):
         self.providers = [
             {**self.providers[0], "use_for_dns": True},

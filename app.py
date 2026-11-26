@@ -1934,11 +1934,18 @@ def validate_subscribe_data(payload):
         if not isinstance(use_for_dns, bool):
             raise ValueError(f"Provider {index} use_for_dns must be true or false.")
 
+        use_for_hosts = provider.get("use_for_hosts", False)
+        if not isinstance(use_for_hosts, bool):
+            raise ValueError(f"Provider {index} use_for_hosts must be true or false.")
+
         surfing_prefix = provider.get("surfing_prefix", "Minor")
         if surfing_prefix not in ("Main", "Minor"):
             raise ValueError(f"Provider {index} surfing_prefix must be Main or Minor.")
 
-        canonical_keys = {"name", "url", "interval", "use_for_ai", "use_for_latency", "use_for_residential", "use_for_dns", "surfing_prefix"}
+        canonical_keys = {
+            "name", "url", "interval", "use_for_ai", "use_for_latency",
+            "use_for_residential", "use_for_dns", "use_for_hosts", "surfing_prefix",
+        }
         normalized_provider = {
             "name": name,
             "url": url,
@@ -1947,6 +1954,7 @@ def validate_subscribe_data(payload):
             "use_for_latency": use_for_latency,
             "use_for_residential": use_for_residential,
             "use_for_dns": use_for_dns,
+            "use_for_hosts": use_for_hosts,
             "surfing_prefix": surfing_prefix,
         }
         normalized_provider.update(
@@ -2048,6 +2056,119 @@ def extract_usable_dns_resolvers(raw_value):
     return [item for item in cleaned if not is_local_loopback_dns_resolver(item)]
 
 
+def extract_subscription_node_domains(config):
+    """Extract normalized non-IP server domains from inline subscription proxies."""
+    proxies = config.get("proxies")
+    if not isinstance(proxies, list) or not proxies:
+        raise ValueError("订阅中没有内联节点，无法提取节点服务器域名。")
+    domains = []
+    seen = set()
+    for proxy in proxies:
+        if not isinstance(proxy, dict) or not isinstance(proxy.get("server"), str):
+            raise ValueError("订阅节点缺少有效的 server 字段。")
+        server = proxy["server"].strip().rstrip(".")
+        try:
+            ipaddress.ip_address(server.strip("[]"))
+            continue
+        except ValueError:
+            pass
+        try:
+            domain = server.encode("idna").decode("ascii").lower()
+        except UnicodeError as error:
+            raise ValueError("订阅包含无效的节点服务器域名。") from error
+        if len(domain) > 253 or not re.fullmatch(
+            r"[a-z0-9](?:[a-z0-9_.-]*[a-z0-9])?", domain
+        ) or any(not label or len(label) > 63 for label in domain.split(".")):
+            raise ValueError("订阅包含无效的节点服务器域名。")
+        if domain not in seen:
+            seen.add(domain)
+            domains.append(domain)
+    return domains
+
+
+def _normalize_host_entry_key(key):
+    if not isinstance(key, str) or not key.strip() or any(ch in key for ch in ("\r", "\n", "\x00")):
+        raise ValueError("订阅 hosts 包含无效的域名键。")
+    cleaned = key.strip()
+    prefix = ""
+    if cleaned.startswith(("+.", "*.", ".")):
+        prefix = cleaned[:2] if cleaned.startswith(("+.", "*.")) else "."
+        body = cleaned[len(prefix) :].rstrip(".")
+    else:
+        body = cleaned.rstrip(".")
+    if not body:
+        raise ValueError("订阅 hosts 包含无效的域名键。")
+    try:
+        normalized_body = body.encode("idna").decode("ascii").lower()
+    except UnicodeError as error:
+        raise ValueError("订阅 hosts 包含无效的域名键。") from error
+    return f"{prefix}{normalized_body}"
+
+
+def _host_key_matches_domain(host_key, domain):
+    if host_key == domain:
+        return True
+    if host_key.startswith("+."):
+        suffix = host_key[2:]
+        return domain == suffix or domain.endswith("." + suffix)
+    if host_key.startswith("*."):
+        suffix = host_key[2:]
+        return domain.endswith("." + suffix) and domain.count(".") == suffix.count(".") + 1
+    if host_key.startswith("."):
+        suffix = host_key[1:]
+        return domain.endswith("." + suffix)
+    return False
+
+
+def _normalize_host_entry_value(value):
+    if isinstance(value, str):
+        cleaned = value.strip()
+        if not cleaned or any(ch in cleaned for ch in ("\r", "\n", "\x00")):
+            raise ValueError("订阅 hosts 包含无效的映射目标。")
+        return cleaned
+    if isinstance(value, list) and value:
+        cleaned_list = []
+        for item in value:
+            if not isinstance(item, str) or not item.strip() or any(ch in item for ch in ("\r", "\n", "\x00")):
+                raise ValueError("订阅 hosts 包含无效的映射目标列表。")
+            cleaned_list.append(item.strip())
+        deduped = list(dict.fromkeys(cleaned_list))
+        return deduped[0] if len(deduped) == 1 else deduped
+    raise ValueError("订阅 hosts 的映射值必须是非空字符串或字符串数组。")
+
+
+def _host_value_as_set(value):
+    if isinstance(value, list):
+        return {str(item).strip().lower() for item in value}
+    return {str(value).strip().lower()}
+
+
+def extract_subscription_hosts_policy(content):
+    """Extract subscription hosts entries matching inline proxy server domains."""
+    yaml = get_yaml_module()
+    try:
+        config = yaml.safe_load(content)
+    except yaml.YAMLError as error:
+        raise ValueError("订阅不是有效的 Clash/Mihomo YAML 配置。") from error
+    if not isinstance(config, dict) or not isinstance(config.get("hosts"), dict) or not config["hosts"]:
+        raise ValueError("订阅中没有 hosts 映射，请确认该机场订阅包含 hosts 字段。")
+    node_domains = extract_subscription_node_domains(config)
+    if not node_domains:
+        return {}
+    matched = {}
+    for raw_key, raw_value in config["hosts"].items():
+        host_key = _normalize_host_entry_key(raw_key)
+        if not any(_host_key_matches_domain(host_key, domain) for domain in node_domains):
+            continue
+        normalized_value = _normalize_host_entry_value(raw_value)
+        if host_key in matched and _host_value_as_set(matched[host_key]) != _host_value_as_set(normalized_value):
+            raise ValueError(f"订阅 hosts 中域名「{host_key}」存在冲突映射。")
+        matched[host_key] = normalized_value
+    if not matched:
+        raise ValueError("订阅 hosts 中没有匹配任何节点服务器域名的条目。")
+    return matched
+
+
 def extract_subscription_dns_policy(content):
     """Map inline node server domains to the subscription's DNS resolvers."""
     yaml = get_yaml_module()
@@ -2067,29 +2188,8 @@ def extract_subscription_dns_policy(content):
         if raw_proxy_ns or raw_ns:
             raise ValueError("订阅 DNS 仅包含本机环回地址（如 127.0.0.1），无法用于 DNS 下发。")
         raise ValueError("订阅中没有有效的 DNS 服务器列表。")
-    proxies = config.get("proxies")
-    if not isinstance(proxies, list) or not proxies:
-        raise ValueError("订阅中没有内联节点，无法提取节点服务器域名。")
-    policy = {}
-    for proxy in proxies:
-        if not isinstance(proxy, dict) or not isinstance(proxy.get("server"), str):
-            raise ValueError("订阅节点缺少有效的 server 字段。")
-        server = proxy["server"].strip().rstrip(".")
-        try:
-            ipaddress.ip_address(server.strip("[]"))
-            continue
-        except ValueError:
-            pass
-        try:
-            domain = server.encode("idna").decode("ascii").lower()
-        except UnicodeError as error:
-            raise ValueError("订阅包含无效的节点服务器域名。") from error
-        if len(domain) > 253 or not re.fullmatch(
-            r"[a-z0-9](?:[a-z0-9_.-]*[a-z0-9])?", domain
-        ) or any(not label or len(label) > 63 for label in domain.split(".")):
-            raise ValueError("订阅包含无效的节点服务器域名。")
-        policy[domain] = list(resolvers)
-    return policy
+    domains = extract_subscription_node_domains(config)
+    return {domain: list(resolvers) for domain in domains}
 
 
 def get_provider_config_path(provider):
@@ -2127,27 +2227,41 @@ def migrate_provider_config_file(provider):
     return path
 
 
-def load_provider_dns_policy(provider, global_user_agent=None):
-    """Refresh a usable YAML cache, or read it when the online config is unavailable."""
+def load_provider_subscription_policies(provider, global_user_agent=None, *, need_dns=False, need_hosts=False):
+    """Fetch or fall back to cached subscription YAML once and extract requested policies."""
     path = migrate_provider_config_file(provider)
+
+    def extract_requested(content):
+        dns_policy = extract_subscription_dns_policy(content) if need_dns else {}
+        hosts_policy = extract_subscription_hosts_policy(content) if need_hosts else {}
+        return dns_policy, hosts_policy
+
     try:
         content = download_provider_subscription(provider, global_user_agent)
-        policy = extract_subscription_dns_policy(content)
+        dns_policy, hosts_policy = extract_requested(content)
     except (ValueError, OSError) as online_error:
         if not path.is_file():
             raise ValueError(f"在线配置不可用（{online_error}），且本地文件 {path.name} 不存在。") from online_error
         try:
             if path.stat().st_size > MAX_SUBSCRIPTION_BYTES:
                 raise ValueError("本地配置超过 10 MiB。")
-            policy = extract_subscription_dns_policy(path.read_text(encoding="utf-8-sig"))
+            dns_policy, hosts_policy = extract_requested(path.read_text(encoding="utf-8-sig"))
         except (ValueError, OSError) as local_error:
             raise ValueError(f"在线配置不可用（{online_error}），本地文件 {path.name} 也无法使用（{local_error}）。") from local_error
-        return policy, {"source": "local", "file": path.name, "fallback_reason": str(online_error)}
+        return dns_policy, hosts_policy, {"source": "local", "file": path.name, "fallback_reason": str(online_error)}
     try:
         write_text_file_atomic(path, content)
     except OSError as error:
         raise ValueError(f"已获取在线配置，但无法保存本地文件 {path.name}。") from error
-    return policy, {"source": "download", "file": path.name}
+    return dns_policy, hosts_policy, {"source": "download", "file": path.name}
+
+
+def load_provider_dns_policy(provider, global_user_agent=None):
+    """Refresh a usable YAML cache, or read it when the online config is unavailable."""
+    dns_policy, _, source_info = load_provider_subscription_policies(
+        provider, global_user_agent, need_dns=True, need_hosts=False
+    )
+    return dns_policy, source_info
 
 
 def apply_provider_dns_policy(full_yaml, providers, global_user_agent=None):
@@ -2187,6 +2301,137 @@ def collect_provider_dns_policy(providers, global_user_agent=None):
             incoming[domain] = resolvers
         adapted.append({"name": name, "domain_count": len(policy), **source_info})
     return incoming, {"dns_policy_count": len(incoming), "dns_providers": adapted}
+
+
+def collect_provider_subscription_policies(providers, global_user_agent=None):
+    """Collect DNS and Clash hosts policies in one download pass per opted-in provider."""
+    selected = [
+        (provider, provider.get("use_for_dns", False) is True, provider.get("use_for_hosts", False) is True)
+        for provider in providers
+        if provider.get("use_for_dns", False) is True or provider.get("use_for_hosts", False) is True
+    ]
+    incoming_dns = {}
+    incoming_hosts = {}
+    dns_adapted = []
+    hosts_adapted = []
+    if not selected:
+        return incoming_dns, incoming_hosts, {
+            "dns_policy_count": 0,
+            "dns_providers": dns_adapted,
+            "hosts_policy_count": 0,
+            "hosts_providers": hosts_adapted,
+        }
+
+    def fetch_one(item):
+        provider, need_dns, need_hosts = item
+        try:
+            if need_dns and not need_hosts:
+                dns_policy, source_info = load_provider_dns_policy(provider, global_user_agent)
+                return (dns_policy, {}, source_info), None
+            return load_provider_subscription_policies(
+                provider, global_user_agent, need_dns=need_dns, need_hosts=need_hosts
+            ), None
+        except ValueError as error:
+            return None, error
+
+    if len(selected) == 1:
+        fetched = [fetch_one(selected[0])]
+    else:
+        with ThreadPoolExecutor(max_workers=min(DNS_FETCH_WORKERS, len(selected))) as pool:
+            fetched = list(pool.map(fetch_one, selected))
+
+    for (provider, need_dns, need_hosts), (loaded, error) in zip(selected, fetched):
+        name = provider.get("name", "Unknown")
+        if error is not None:
+            label = "DNS/Hosts" if (need_dns and need_hosts) else ("DNS" if need_dns else "Hosts")
+            raise ValueError(f"机场「{name}」{label} 下发失败：{error}") from error
+        dns_policy, hosts_policy, source_info = loaded
+        if need_dns:
+            for domain, resolvers in dns_policy.items():
+                if domain in incoming_dns and set(incoming_dns[domain]) != set(resolvers):
+                    raise ValueError(f"机场「{name}」DNS 策略冲突：多个机场对同一节点域名指定了不同 DNS。")
+                incoming_dns[domain] = resolvers
+            dns_adapted.append({"name": name, "domain_count": len(dns_policy), **source_info})
+        if need_hosts:
+            for host_key, target in hosts_policy.items():
+                if host_key in incoming_hosts and _host_value_as_set(incoming_hosts[host_key]) != _host_value_as_set(target):
+                    raise ValueError(f"机场「{name}」Hosts 策略冲突：多个机场对同一节点域名「{host_key}」指定了不同映射。")
+                incoming_hosts[host_key] = target
+            hosts_adapted.append({"name": name, "host_count": len(hosts_policy), **source_info})
+
+    return incoming_dns, incoming_hosts, {
+        "dns_policy_count": len(incoming_dns),
+        "dns_providers": dns_adapted,
+        "hosts_policy_count": len(incoming_hosts),
+        "hosts_providers": hosts_adapted,
+    }
+
+
+def merge_provider_hosts_policy(full_yaml, incoming_hosts):
+    """Merge extracted subscription node hosts into root-level Clash hosts."""
+    if not incoming_hosts:
+        return full_yaml
+    yaml = get_yaml_module()
+    try:
+        config = yaml.safe_load(full_yaml)
+        root = yaml.compose(full_yaml, Loader=yaml.SafeLoader)
+    except yaml.YAMLError as error:
+        raise ValueError("生成配置的 YAML 无效，无法合并 Hosts 策略。") from error
+    if not isinstance(config, dict):
+        raise ValueError("生成配置的 YAML 顶层必须是映射。")
+    dns = config.get("dns")
+    if isinstance(dns, dict) and dns.get("use-hosts") is False:
+        raise ValueError("Hosts 下发需要在模板中启用 dns.use-hosts（或省略以使用默认值 true）。")
+    raw_hosts = config.get("hosts")
+    if raw_hosts is not None and not isinstance(raw_hosts, dict):
+        raise ValueError("模板中的 hosts 必须是映射。")
+    existing = dict(raw_hosts) if isinstance(raw_hosts, dict) else {}
+    existing_by_lower = {str(k).strip().lower(): (k, v) for k, v in existing.items()}
+
+    added_keys = []
+    for host_key, target in incoming_hosts.items():
+        lower_key = host_key.lower()
+        if lower_key in existing_by_lower:
+            _, existing_val = existing_by_lower[lower_key]
+            if _host_value_as_set(existing_val) != _host_value_as_set(target):
+                raise ValueError(f"下发 Hosts 与模板中已有的「{host_key}」映射冲突。")
+            continue
+        existing[host_key] = target
+        existing_by_lower[lower_key] = (host_key, target)
+        added_keys.append(host_key)
+
+    if not added_keys:
+        return full_yaml
+
+    base_hosts = {k: v for k, v in existing.items() if k not in added_keys}
+    new_hosts = {k: existing[k] for k in added_keys}
+    lines = ["hosts:"]
+    if base_hosts:
+        base_dumped = yaml.safe_dump(base_hosts, allow_unicode=True, sort_keys=False)
+        lines.extend(f"  {line}" for line in base_dumped.splitlines())
+    lines.append("  # Hosts 下发：为下列节点域名指定映射。")
+    new_dumped = yaml.safe_dump(new_hosts, allow_unicode=True, sort_keys=False)
+    lines.extend(f"  {line}" for line in new_dumped.splitlines())
+    replacement = "\n".join(lines) + "\n"
+
+    hosts_pair = next(((key, value) for key, value in root.value if key.value == "hosts"), None)
+    if hosts_pair is not None:
+        hosts_key, hosts_value = hosts_pair
+        if hosts_value.flow_style:
+            replacement = replacement.rstrip("\n")
+        full_yaml = full_yaml[:hosts_key.start_mark.index] + replacement + full_yaml[hosts_value.end_mark.index:]
+    else:
+        dns_pair = next(((key, value) for key, value in root.value if key.value == "dns"), None)
+        if dns_pair is not None:
+            insert_at = dns_pair[0].start_mark.index
+            full_yaml = full_yaml[:insert_at] + replacement + "\n" + full_yaml[insert_at:]
+        else:
+            full_yaml = replacement + "\n" + full_yaml
+    try:
+        yaml.safe_load(full_yaml)
+    except yaml.YAMLError as error:
+        raise ValueError("Hosts 合并后的 YAML 无效，请检查模板格式。") from error
+    return full_yaml
 
 
 def merge_provider_dns_policy(full_yaml, incoming):
@@ -3062,6 +3307,7 @@ def generate_clashmihomo_config(
     rule_snapshot,
     converted_rules,
     dns_policy,
+    hosts_policy=None,
 ):
     """Render config/clash/clashmihomo_template.yaml into rule-set/clash/clashmihomo.yaml."""
     template_path = get_clashmihomo_template_path()
@@ -3081,6 +3327,7 @@ def generate_clashmihomo_config(
         converted_rules=converted_rules,
     )
     rendered = merge_provider_dns_policy(rendered, dns_policy)
+    rendered = merge_provider_hosts_policy(rendered, hosts_policy)
     validate_generated_openclash_config(rendered)
 
     output_path = get_clashmihomo_output_path()
@@ -3151,10 +3398,11 @@ def generate_full_openclash_config(rules_list=None, converted_rules=None):
     except (ValueError, OSError) as error:
         return {"ok": False, "error": str(error)}
 
-    # Step 4: Collect DNS policy once and validate OpenClash output
+    # Step 4: Collect DNS & Clash hosts policies once and validate OpenClash output
     try:
-        dns_policy, dns_info = collect_provider_dns_policy(providers, global_ua)
+        dns_policy, hosts_policy, policy_info = collect_provider_subscription_policies(providers, global_ua)
         full_yaml = merge_provider_dns_policy(full_yaml, dns_policy)
+        full_yaml = merge_provider_hosts_policy(full_yaml, hosts_policy)
         validate_generated_openclash_config(full_yaml)
     except ValueError as error:
         return {"ok": False, "error": str(error)}
@@ -3175,6 +3423,7 @@ def generate_full_openclash_config(rules_list=None, converted_rules=None):
                 rule_snapshot=rule_snapshot,
                 converted_rules=converted_rules,
                 dns_policy=dns_policy,
+                hosts_policy=hosts_policy,
             )
         except (OSError, ValueError) as error:
             clashmihomo_output = {"ok": False, "error": str(error)}
@@ -3191,7 +3440,7 @@ def generate_full_openclash_config(rules_list=None, converted_rules=None):
         "provider_count": len(providers),
         "proxy_providers": [p.get("name", "Unknown") for p in providers],
         **extra_outputs,
-        **dns_info,
+        **policy_info,
     }
 
 
