@@ -2367,8 +2367,32 @@ def collect_provider_subscription_policies(providers, global_user_agent=None):
     }
 
 
+def extract_dns_listen_port(dns_config):
+    """Extract a valid port from Clash dns.listen (e.g. '0.0.0.0:7874' -> 7874)."""
+    if not isinstance(dns_config, dict):
+        return None
+    raw_listen = dns_config.get("listen")
+    if not isinstance(raw_listen, str):
+        return None
+    listen = raw_listen.strip()
+    if not listen:
+        return None
+    if listen.startswith("["):
+        _, sep, port_str = listen.rpartition("]:")
+    else:
+        if listen.count(":") != 1:
+            return None
+        _, sep, port_str = listen.rpartition(":")
+    if not sep or not port_str.isdigit():
+        return None
+    port = int(port_str)
+    if not (1 <= port <= 65535):
+        return None
+    return port
+
+
 def merge_provider_hosts_policy(full_yaml, incoming_hosts):
-    """Merge extracted subscription node hosts into root-level Clash hosts."""
+    """Merge extracted subscription node hosts into root-level Clash hosts and DNS rules."""
     if not incoming_hosts:
         return full_yaml
     yaml = get_yaml_module()
@@ -2400,33 +2424,123 @@ def merge_provider_hosts_policy(full_yaml, incoming_hosts):
         existing_by_lower[lower_key] = (host_key, target)
         added_keys.append(host_key)
 
-    if not added_keys:
+    dns_modified = False
+    added_loopback_policy = False
+    has_other_policy = False
+    if isinstance(dns, dict) and dns.get("enable") is True:
+        # 1) Keep host-mapped node domains out of Fake-IP so local DNS returns real IPs.
+        if dns.get("enhanced-mode") == "fake-ip" or "fake-ip-filter" in dns:
+            raw_filter = dns.get("fake-ip-filter")
+            if raw_filter is None:
+                fake_ip_filter = []
+            elif isinstance(raw_filter, list):
+                fake_ip_filter = list(raw_filter)
+            else:
+                raise ValueError("模板中的 fake-ip-filter 必须是列表。")
+            existing_filter_lower = {str(item).strip().lower() for item in fake_ip_filter}
+            filter_added = False
+            for host_key in incoming_hosts:
+                if host_key.lower() not in existing_filter_lower:
+                    fake_ip_filter.append(host_key)
+                    existing_filter_lower.add(host_key.lower())
+                    filter_added = True
+            if filter_added:
+                dns["fake-ip-filter"] = fake_ip_filter
+                dns_modified = True
+
+        # 2) Route host-mapped node domains to Mihomo's own dns.listen port so
+        #    proxy-server-nameserver hits top-level hosts (Mihomo Issue #3478).
+        listen_port = extract_dns_listen_port(dns)
+        if listen_port is not None:
+            loopback_resolver = f"udp://127.0.0.1:{listen_port}"
+            raw_policy = dns.get("proxy-server-nameserver-policy")
+            if raw_policy is None:
+                existing_policy = {}
+            elif isinstance(raw_policy, dict):
+                existing_policy = dict(raw_policy)
+            else:
+                raise ValueError("模板中的 proxy-server-nameserver-policy 必须是映射。")
+            existing_policy_by_lower = {str(k).strip().lower(): k for k in existing_policy}
+            incoming_lower = {k.lower() for k in incoming_hosts}
+            has_other_policy = any(str(k).strip().lower() not in incoming_lower for k in existing_policy)
+            policy_changed = False
+            for host_key in incoming_hosts:
+                lower_key = host_key.lower()
+                if lower_key in existing_policy_by_lower:
+                    orig_key = existing_policy_by_lower[lower_key]
+                    current = existing_policy[orig_key]
+                    current_list = [current] if isinstance(current, str) else current
+                    if current_list == [loopback_resolver]:
+                        continue
+                    existing_policy[orig_key] = [loopback_resolver]
+                    policy_changed = True
+                else:
+                    existing_policy[host_key] = [loopback_resolver]
+                    existing_policy_by_lower[lower_key] = host_key
+                    policy_changed = True
+            if policy_changed:
+                dns["proxy-server-nameserver-policy"] = existing_policy
+                if not dns.get("proxy-server-nameserver"):
+                    baseline = dns.get("nameserver") or dns.get("default-nameserver")
+                    if baseline:
+                        dns["proxy-server-nameserver"] = baseline
+                dns_modified = True
+                added_loopback_policy = True
+
+    if not added_keys and not dns_modified:
         return full_yaml
 
-    base_hosts = {k: v for k, v in existing.items() if k not in added_keys}
-    new_hosts = {k: existing[k] for k in added_keys}
-    lines = ["hosts:"]
-    if base_hosts:
-        base_dumped = yaml.safe_dump(base_hosts, allow_unicode=True, sort_keys=False)
-        lines.extend(f"  {line}" for line in base_dumped.splitlines())
-    lines.append("  # Hosts 下发：为下列节点域名指定映射。")
-    new_dumped = yaml.safe_dump(new_hosts, allow_unicode=True, sort_keys=False)
-    lines.extend(f"  {line}" for line in new_dumped.splitlines())
-    replacement = "\n".join(lines) + "\n"
+    if added_keys:
+        base_hosts = {k: v for k, v in existing.items() if k not in added_keys}
+        new_hosts = {k: existing[k] for k in added_keys}
+        lines = ["hosts:"]
+        if base_hosts:
+            base_dumped = yaml.safe_dump(base_hosts, allow_unicode=True, sort_keys=False)
+            lines.extend(f"  {line}" for line in base_dumped.splitlines())
+        lines.append("  # Hosts 下发：为下列节点域名指定映射。")
+        new_dumped = yaml.safe_dump(new_hosts, allow_unicode=True, sort_keys=False)
+        lines.extend(f"  {line}" for line in new_dumped.splitlines())
+        replacement = "\n".join(lines) + "\n"
 
-    hosts_pair = next(((key, value) for key, value in root.value if key.value == "hosts"), None)
-    if hosts_pair is not None:
-        hosts_key, hosts_value = hosts_pair
-        if hosts_value.flow_style:
-            replacement = replacement.rstrip("\n")
-        full_yaml = full_yaml[:hosts_key.start_mark.index] + replacement + full_yaml[hosts_value.end_mark.index:]
-    else:
-        dns_pair = next(((key, value) for key, value in root.value if key.value == "dns"), None)
-        if dns_pair is not None:
-            insert_at = dns_pair[0].start_mark.index
-            full_yaml = full_yaml[:insert_at] + replacement + "\n" + full_yaml[insert_at:]
+        hosts_pair = next(((key, value) for key, value in root.value if key.value == "hosts"), None)
+        if hosts_pair is not None:
+            hosts_key, hosts_value = hosts_pair
+            if hosts_value.flow_style:
+                replacement = replacement.rstrip("\n")
+            full_yaml = full_yaml[:hosts_key.start_mark.index] + replacement + full_yaml[hosts_value.end_mark.index:]
         else:
-            full_yaml = replacement + "\n" + full_yaml
+            dns_pair = next(((key, value) for key, value in root.value if key.value == "dns"), None)
+            if dns_pair is not None:
+                insert_at = dns_pair[0].start_mark.index
+                full_yaml = full_yaml[:insert_at] + replacement + "\n" + full_yaml[insert_at:]
+            else:
+                full_yaml = replacement + "\n" + full_yaml
+
+    if dns_modified:
+        root = yaml.compose(full_yaml, Loader=yaml.SafeLoader)
+        dns_key, dns_value = next((key, value) for key, value in root.value if key.value == "dns")
+        dns_replacement = yaml.safe_dump({"dns": dns}, allow_unicode=True, sort_keys=False)
+        if added_loopback_policy:
+            policy_comment = (
+                "# DNS / Hosts 下发：为节点域名指定解析服务器（Hosts 节点走本机 DNS 以命中 hosts）。"
+                if has_other_policy
+                else "# Hosts 下发：节点域名走本机 DNS 监听端口以命中 hosts。"
+            )
+            dns_replacement = dns_replacement.replace(
+                "\n  proxy-server-nameserver-policy:",
+                f"\n  {policy_comment}\n  proxy-server-nameserver-policy:",
+                1,
+            )
+        elif "proxy-server-nameserver-policy" in dns:
+            dns_replacement = dns_replacement.replace(
+                "\n  proxy-server-nameserver-policy:",
+                "\n  # DNS 下发：为下列节点域名指定解析服务器。\n  proxy-server-nameserver-policy:",
+                1,
+            )
+        if dns_value.flow_style:
+            dns_replacement = dns_replacement.rstrip("\n")
+        full_yaml = full_yaml[:dns_key.start_mark.index] + dns_replacement + full_yaml[dns_value.end_mark.index:]
+
     try:
         yaml.safe_load(full_yaml)
     except yaml.YAMLError as error:

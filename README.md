@@ -133,7 +133,7 @@ python app.py
 | `providers[].use_for_ai` | 是否为 AI 策略组生成“机场·国家”测速组，默认 `true` |
 | `providers[].use_for_residential` | 是否创建该机场的家宽手动选择组，独立于 AI 开关，默认 `false` |
 | `providers[].use_for_dns` | 是否从订阅提取 DNS 并为该机场节点服务器域名生成定向解析策略，默认 `false` |
-| `providers[].use_for_hosts` | 是否从订阅提取与节点服务器域名匹配的 `hosts` 映射并合并到 Clash 配置（OpenClash / ClashMihomo），默认 `false` |
+| `providers[].use_for_hosts` | 是否从订阅提取与节点服务器域名匹配的 `hosts` 映射并合并到 Clash 配置（OpenClash / ClashMihomo），同时自动写入 `dns.fake-ip-filter` 并按模板 `dns.listen` 端口配置本机回环 `proxy-server-nameserver-policy`，默认 `false` |
 | `providers[].use_for_latency` | 是否让该机场组自动选择延迟最低节点，默认 `false` |
 | `providers[].surfing_prefix` | Surfing 节点前缀，可选 `Main` 或 `Minor`，默认 `Minor` |
 | `providers[].override.additional-prefix` | 节点名前缀 |

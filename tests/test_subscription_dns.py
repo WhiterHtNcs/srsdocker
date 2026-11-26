@@ -410,11 +410,113 @@ class SubscriptionDnsTests(unittest.TestCase):
 
         clashmihomo = yaml.safe_load(app.get_clashmihomo_output_path().read_text(encoding="utf-8"))
         self.assertEqual(clashmihomo["hosts"], {"a.163cdn-agent.net": "real-a.163cdn-agent.net"})
+        self.assertIn("a.163cdn-agent.net", openclash["dns"]["fake-ip-filter"])
+        self.assertIn("a.163cdn-agent.net", clashmihomo["dns"]["fake-ip-filter"])
 
         surfing = yaml.safe_load((app.OPENCLASH_DIR.parent / "mobile" / "config.yaml").read_text(encoding="utf-8"))
         self.assertNotIn("hosts", surfing)
         shadowrocket = (app.OPENCLASH_DIR.parent / "mobile" / "shadowrocket.conf").read_text(encoding="utf-8")
         self.assertNotIn("real-a.163cdn-agent.net", shadowrocket)
+
+    def test_extract_dns_listen_port_handles_valid_and_invalid_values(self):
+        self.assertEqual(app.extract_dns_listen_port({"listen": "0.0.0.0:7874"}), 7874)
+        self.assertEqual(app.extract_dns_listen_port({"listen": "127.0.0.1:1053"}), 1053)
+        self.assertEqual(app.extract_dns_listen_port({"listen": ":1053"}), 1053)
+        self.assertEqual(app.extract_dns_listen_port({"listen": "[::]:7874"}), 7874)
+        self.assertEqual(app.extract_dns_listen_port({"listen": "[::1]:1053"}), 1053)
+        for bad in [{}, {"listen": ""}, {"listen": "0.0.0.0"}, {"listen": "0.0.0.0:0"},
+                    {"listen": "0.0.0.0:70000"}, {"listen": "::1"}, {"listen": 7874}, None]:
+            with self.subTest(bad=bad):
+                self.assertIsNone(app.extract_dns_listen_port(bad))
+
+    def test_hosts_policy_auto_reads_dns_listen_port_for_openclash_and_clashmihomo(self):
+        openclash_tpl = BASE_CONFIG.replace(
+            "  fake-ip-filter: ['+.lan']\n",
+            "  enhanced-mode: fake-ip\n  listen: 0.0.0.0:7874\n  fake-ip-filter: ['+.lan']\n",
+        )
+        mihomo_tpl = BASE_CONFIG.replace(
+            "  fake-ip-filter: ['+.lan']\n",
+            "  enhanced-mode: fake-ip\n  listen: 127.0.0.1:1053\n  fake-ip-filter: ['+.lan']\n",
+        )
+        app.TEMPLATE_PATH.write_text(openclash_tpl, encoding="utf-8")
+        app.get_clashmihomo_template_path().write_text(mihomo_tpl, encoding="utf-8")
+
+        ytoo_sub = yaml.safe_dump({
+            "dns": {"enable": True, "nameserver": ["https://doh.pub/dns-query"], "proxy-server-nameserver": ["udp://127.0.0.1:1053"]},
+            "hosts": {
+                "a.163cdn-agent.net": "real-a.163cdn-agent.net",
+                "b.163cdn-agent.net": "real-b.163cdn-agent.net",
+            },
+            "proxies": [
+                {"name": "HK 01", "type": "anytls", "server": "a.163cdn-agent.net"},
+                {"name": "JP 01", "type": "anytls", "server": "b.163cdn-agent.net"},
+            ],
+        })
+        self.providers = [
+            {"name": "MESL", "url": "https://mesl.example/sub", "use_for_ai": False, "use_for_dns": True, "use_for_hosts": False},
+            {"name": "YToo", "url": "https://ytoo.example/sub", "use_for_ai": False, "use_for_dns": False, "use_for_hosts": True},
+        ]
+        self.save_providers()
+
+        def fake_download(provider, _ua=None):
+            if provider["name"] == "MESL":
+                return subscription(["node.mesl.example"], ["https://zone.rlose.com:39933/api-query"])
+            return ytoo_sub
+
+        with patch.object(app, "download_provider_subscription", side_effect=fake_download):
+            result = app.generate_all_openclash_rules()
+
+        self.assertTrue(result["ok"], result)
+        openclash = self.read_generated()
+        self.assertEqual(openclash["dns"]["fake-ip-filter"], ["+.lan", "a.163cdn-agent.net", "b.163cdn-agent.net"])
+        self.assertEqual(openclash["dns"]["proxy-server-nameserver-policy"], {
+            "node.mesl.example": ["https://zone.rlose.com:39933/api-query"],
+            "a.163cdn-agent.net": ["udp://127.0.0.1:7874"],
+            "b.163cdn-agent.net": ["udp://127.0.0.1:7874"],
+        })
+
+        clashmihomo = yaml.safe_load(app.get_clashmihomo_output_path().read_text(encoding="utf-8"))
+        self.assertEqual(clashmihomo["dns"]["fake-ip-filter"], ["+.lan", "a.163cdn-agent.net", "b.163cdn-agent.net"])
+        self.assertEqual(clashmihomo["dns"]["proxy-server-nameserver-policy"], {
+            "node.mesl.example": ["https://zone.rlose.com:39933/api-query"],
+            "a.163cdn-agent.net": ["udp://127.0.0.1:1053"],
+            "b.163cdn-agent.net": ["udp://127.0.0.1:1053"],
+        })
+
+        # Idempotent if merged a second time (no duplicate fake-ip-filter entries).
+        raw_openclash = (app.OPENCLASH_DIR / app.OPENCLASH_ALL_FILENAME).read_text(encoding="utf-8")
+        self.assertEqual(
+            app.merge_provider_hosts_policy(raw_openclash, {
+                "a.163cdn-agent.net": "real-a.163cdn-agent.net",
+                "b.163cdn-agent.net": "real-b.163cdn-agent.net",
+            }),
+            raw_openclash,
+        )
+
+    def test_hosts_policy_overrides_dns_policy_with_loopback_when_listen_is_set(self):
+        tpl = BASE_CONFIG.replace(
+            "  fake-ip-filter: ['+.lan']\n",
+            "  enhanced-mode: fake-ip\n  listen: 0.0.0.0:7874\n  fake-ip-filter: ['+.lan']\n",
+        )
+        app.TEMPLATE_PATH.write_text(tpl, encoding="utf-8")
+        combined_sub = yaml.safe_dump({
+            "dns": {"enable": True, "nameserver": ["https://airport.example/dns-query"]},
+            "hosts": {"alias.example": "real.example"},
+            "proxies": [
+                {"name": "n1", "type": "anytls", "server": "alias.example"},
+                {"name": "n2", "type": "anytls", "server": "normal.example"},
+            ],
+        })
+        self.providers[0].update(use_for_dns=True, use_for_hosts=True)
+        self.save_providers()
+        with patch.object(app, "download_provider_subscription", return_value=combined_sub):
+            result = app.generate_full_openclash_config()
+        self.assertTrue(result["ok"], result)
+        generated = self.read_generated()
+        self.assertEqual(generated["dns"]["proxy-server-nameserver-policy"], {
+            "alias.example": ["udp://127.0.0.1:7874"],
+            "normal.example": ["https://airport.example/dns-query"],
+        })
 
     def test_provider_with_both_dns_and_hosts_downloads_once_and_conflicts_fail(self):
         combined_sub = yaml.safe_dump({
