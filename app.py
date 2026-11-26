@@ -2391,6 +2391,61 @@ def extract_dns_listen_port(dns_config):
     return port
 
 
+def _extract_host_target_domains(incoming_hosts):
+    """Extract normalized non-IP domain targets from a hosts mapping (e.g. alias -> real domain)."""
+    targets = []
+    seen = set()
+    for value in incoming_hosts.values():
+        items = [value] if isinstance(value, str) else (value if isinstance(value, list) else [])
+        for raw in items:
+            if not isinstance(raw, str):
+                continue
+            candidate = raw.strip().rstrip(".")
+            if not candidate:
+                continue
+            try:
+                ipaddress.ip_address(candidate.strip("[]"))
+                continue
+            except ValueError:
+                pass
+            if candidate.startswith("rule-set:") or "/" in candidate or ":" in candidate:
+                continue
+            try:
+                domain = candidate.encode("idna").decode("ascii").lower()
+            except UnicodeError:
+                continue
+            if domain not in seen:
+                seen.add(domain)
+                targets.append(domain)
+    return targets
+
+
+def _extract_direct_dns_resolvers(dns_config):
+    """Return usable direct DNS resolvers from the template (excluding loopback and proxy-tagged entries)."""
+    for field in ("proxy-server-nameserver", "nameserver", "default-nameserver"):
+        raw = dns_config.get(field)
+        if not raw:
+            continue
+        items = [raw] if isinstance(raw, str) else (raw if isinstance(raw, list) else [])
+        direct = []
+        for item in items:
+            if not isinstance(item, str) or not item.strip():
+                continue
+            cleaned = item.strip()
+            if is_local_loopback_dns_resolver(cleaned):
+                continue
+            fragment = cleaned.partition("#")[2].split("&", 1)[0]
+            if fragment and "=" not in fragment and fragment not in {
+                "DIRECT", "h3", "skip-cert-verify", "disable-ipv4", "disable-ipv6"
+            }:
+                continue
+            if cleaned not in direct:
+                direct.append(cleaned)
+        if direct:
+            return direct
+    return []
+
+
 def merge_provider_hosts_policy(full_yaml, incoming_hosts):
     """Merge extracted subscription node hosts into root-level Clash hosts and DNS rules."""
     if not incoming_hosts:
@@ -2427,8 +2482,11 @@ def merge_provider_hosts_policy(full_yaml, incoming_hosts):
     dns_modified = False
     added_loopback_policy = False
     has_other_policy = False
+    target_domains = _extract_host_target_domains(incoming_hosts)
     if isinstance(dns, dict) and dns.get("enable") is True:
-        # 1) Keep host-mapped node domains out of Fake-IP so local DNS returns real IPs.
+        # 1) Keep BOTH host keys and domain-type alias targets out of Fake-IP:
+        #    Mihomo's withHosts middleware rewrites A -> B before withFakeIP runs,
+        #    so B must also match fake-ip-filter or Fake-IP (198.18.x.x) is returned.
         if dns.get("enhanced-mode") == "fake-ip" or "fake-ip-filter" in dns:
             raw_filter = dns.get("fake-ip-filter")
             if raw_filter is None:
@@ -2439,16 +2497,39 @@ def merge_provider_hosts_policy(full_yaml, incoming_hosts):
                 raise ValueError("模板中的 fake-ip-filter 必须是列表。")
             existing_filter_lower = {str(item).strip().lower() for item in fake_ip_filter}
             filter_added = False
-            for host_key in incoming_hosts:
-                if host_key.lower() not in existing_filter_lower:
-                    fake_ip_filter.append(host_key)
-                    existing_filter_lower.add(host_key.lower())
+            for filter_domain in [*incoming_hosts.keys(), *target_domains]:
+                if filter_domain.lower() not in existing_filter_lower:
+                    fake_ip_filter.append(filter_domain)
+                    existing_filter_lower.add(filter_domain.lower())
                     filter_added = True
             if filter_added:
                 dns["fake-ip-filter"] = fake_ip_filter
                 dns_modified = True
 
-        # 2) Route host-mapped node domains to Mihomo's own dns.listen port so
+        # 2) Pin domain-type host targets to direct resolvers in nameserver-policy
+        #    when fallback is enabled so resolving them never triggers a proxy fallback loop.
+        if target_domains and dns.get("fallback"):
+            direct_resolvers = _extract_direct_dns_resolvers(dns)
+            if direct_resolvers:
+                raw_ns_policy = dns.get("nameserver-policy")
+                if raw_ns_policy is None:
+                    ns_policy = {}
+                elif isinstance(raw_ns_policy, dict):
+                    ns_policy = dict(raw_ns_policy)
+                else:
+                    raise ValueError("模板中的 nameserver-policy 必须是映射。")
+                ns_policy_lower = {str(k).strip().lower() for k in ns_policy}
+                ns_policy_changed = False
+                for target_domain in target_domains:
+                    if target_domain.lower() not in ns_policy_lower:
+                        ns_policy[target_domain] = list(direct_resolvers)
+                        ns_policy_lower.add(target_domain.lower())
+                        ns_policy_changed = True
+                if ns_policy_changed:
+                    dns["nameserver-policy"] = ns_policy
+                    dns_modified = True
+
+        # 3) Route host-mapped node domains to Mihomo's own dns.listen port so
         #    proxy-server-nameserver hits top-level hosts (Mihomo Issue #3478).
         listen_port = extract_dns_listen_port(dns)
         if listen_port is not None:

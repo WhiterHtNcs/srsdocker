@@ -432,7 +432,8 @@ class SubscriptionDnsTests(unittest.TestCase):
     def test_hosts_policy_auto_reads_dns_listen_port_for_openclash_and_clashmihomo(self):
         openclash_tpl = BASE_CONFIG.replace(
             "  fake-ip-filter: ['+.lan']\n",
-            "  enhanced-mode: fake-ip\n  listen: 0.0.0.0:7874\n  fake-ip-filter: ['+.lan']\n",
+            "  enhanced-mode: fake-ip\n  listen: 0.0.0.0:7874\n  fake-ip-filter: ['+.lan']\n"
+            "  fallback: ['https://dns.google/dns-query#SELECTOR']\n",
         )
         mihomo_tpl = BASE_CONFIG.replace(
             "  fake-ip-filter: ['+.lan']\n",
@@ -446,10 +447,12 @@ class SubscriptionDnsTests(unittest.TestCase):
             "hosts": {
                 "a.163cdn-agent.net": "real-a.163cdn-agent.net",
                 "b.163cdn-agent.net": "real-b.163cdn-agent.net",
+                "ip-node.example": "198.51.100.10",
             },
             "proxies": [
                 {"name": "HK 01", "type": "anytls", "server": "a.163cdn-agent.net"},
                 {"name": "JP 01", "type": "anytls", "server": "b.163cdn-agent.net"},
+                {"name": "SG 01", "type": "anytls", "server": "ip-node.example"},
             ],
         })
         self.providers = [
@@ -468,19 +471,40 @@ class SubscriptionDnsTests(unittest.TestCase):
 
         self.assertTrue(result["ok"], result)
         openclash = self.read_generated()
-        self.assertEqual(openclash["dns"]["fake-ip-filter"], ["+.lan", "a.163cdn-agent.net", "b.163cdn-agent.net"])
+        self.assertEqual(openclash["dns"]["fake-ip-filter"], [
+            "+.lan",
+            "a.163cdn-agent.net",
+            "b.163cdn-agent.net",
+            "ip-node.example",
+            "real-a.163cdn-agent.net",
+            "real-b.163cdn-agent.net",
+        ])
+        self.assertEqual(openclash["dns"]["nameserver-policy"], {
+            "real-a.163cdn-agent.net": ["https://original.example/dns-query"],
+            "real-b.163cdn-agent.net": ["https://original.example/dns-query"],
+        })
         self.assertEqual(openclash["dns"]["proxy-server-nameserver-policy"], {
             "node.mesl.example": ["https://zone.rlose.com:39933/api-query"],
             "a.163cdn-agent.net": ["udp://127.0.0.1:7874"],
             "b.163cdn-agent.net": ["udp://127.0.0.1:7874"],
+            "ip-node.example": ["udp://127.0.0.1:7874"],
         })
 
         clashmihomo = yaml.safe_load(app.get_clashmihomo_output_path().read_text(encoding="utf-8"))
-        self.assertEqual(clashmihomo["dns"]["fake-ip-filter"], ["+.lan", "a.163cdn-agent.net", "b.163cdn-agent.net"])
+        self.assertEqual(clashmihomo["dns"]["fake-ip-filter"], [
+            "+.lan",
+            "a.163cdn-agent.net",
+            "b.163cdn-agent.net",
+            "ip-node.example",
+            "real-a.163cdn-agent.net",
+            "real-b.163cdn-agent.net",
+        ])
+        self.assertNotIn("nameserver-policy", clashmihomo["dns"])
         self.assertEqual(clashmihomo["dns"]["proxy-server-nameserver-policy"], {
             "node.mesl.example": ["https://zone.rlose.com:39933/api-query"],
             "a.163cdn-agent.net": ["udp://127.0.0.1:1053"],
             "b.163cdn-agent.net": ["udp://127.0.0.1:1053"],
+            "ip-node.example": ["udp://127.0.0.1:1053"],
         })
 
         # Idempotent if merged a second time (no duplicate fake-ip-filter entries).
@@ -489,6 +513,7 @@ class SubscriptionDnsTests(unittest.TestCase):
             app.merge_provider_hosts_policy(raw_openclash, {
                 "a.163cdn-agent.net": "real-a.163cdn-agent.net",
                 "b.163cdn-agent.net": "real-b.163cdn-agent.net",
+                "ip-node.example": "198.51.100.10",
             }),
             raw_openclash,
         )
