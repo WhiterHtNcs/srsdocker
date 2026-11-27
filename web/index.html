@@ -859,7 +859,7 @@
       useForHosts.type = "checkbox";
       useForHosts.checked = provider.use_for_hosts === true;
       useForHosts.dataset.field = "use_for_hosts";
-      hostsField.title = "生成 Clash 配置时从订阅提取节点 hosts 映射并合并到顶层 hosts，成功后保存为 config/providers/机场名.yaml；在线不可用时读取该本地文件。";
+      hostsField.title = "生成 Clash 和 Surfing 配置时从订阅提取节点 hosts 映射并联动 DNS 策略，成功后保存为 config/providers/机场名.yaml；在线不可用时读取该本地文件。";
       hostsField.append(useForHosts, document.createTextNode("Hosts 下发"));
 
       const latencyField = document.createElement("label");
@@ -1216,6 +1216,9 @@
         const messages = mobileConfigMessages(result);
         if (result.dns_policy_count) {
           messages.push(`DNS 下发 ${result.dns_policy_count} 个节点域名`);
+        }
+        if (result.hosts_policy_count) {
+          messages.push(`Hosts 下发 ${result.hosts_policy_count} 条`);
         }
         reportStatus(messages.join("\n"));
       } catch (error) {

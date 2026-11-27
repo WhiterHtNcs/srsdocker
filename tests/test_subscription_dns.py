@@ -414,9 +414,116 @@ class SubscriptionDnsTests(unittest.TestCase):
         self.assertIn("a.163cdn-agent.net", clashmihomo["dns"]["fake-ip-filter"])
 
         surfing = yaml.safe_load((app.OPENCLASH_DIR.parent / "mobile" / "config.yaml").read_text(encoding="utf-8"))
-        self.assertNotIn("hosts", surfing)
+        self.assertEqual(surfing["hosts"], {"a.163cdn-agent.net": "real-a.163cdn-agent.net"})
         shadowrocket = (app.OPENCLASH_DIR.parent / "mobile" / "shadowrocket.conf").read_text(encoding="utf-8")
         self.assertNotIn("real-a.163cdn-agent.net", shadowrocket)
+
+    def test_surfing_hosts_policy_pins_targets_to_direct_proxy_and_uses_listen_port(self):
+        mobile = app.CONFIG_PATH.parent / "mobile"
+        mobile.mkdir()
+        surfing_tpl = """p: &p
+  proxy: DIRECT
+  health-check: {enable: true, interval: 300}
+  header: {User-Agent: [surfing]}
+providers: &providers
+  use: __PROVIDER_NODES__
+proxy-providers:
+  __PROXY_PROVIDERS__: {}
+profile: {store-selected: true}
+hosts:
+  '*.local.test': 192.168.5.224
+dns:
+  enable: true
+  listen: 0.0.0.0:1053
+  enhanced-mode: fake-ip
+  fake-ip-filter:
+    - '*.local.test'
+  proxy-server-nameserver:
+    - https://1.12.12.12:443/dns-query#🌐 本机·本地直连&h3=false
+    - https://223.5.5.5:443/dns-query#🌐 本机·本地直连&h3=true
+  nameserver-policy:
+    'RULE-SET:CN_域':
+      - https://1.12.12.12:443/dns-query#🌐 本机·本地直连&h3=false
+  nameserver:
+    - https://8.8.8.8:443/dns-query#DNS连接&h3=true
+proxies:
+  - {name: 🌐 本机·本地直连, type: direct, udp: true}
+proxy-groups:
+  - name: Mobile
+    type: select
+    <<: *providers
+  - name: DNS连接
+    type: select
+    proxies: [Mobile]
+rule-providers:
+  Mobile:
+    type: file
+    path: ./rules/mobile.list
+rules:
+  - RULE-SET,Mobile,Mobile
+  - MATCH,DIRECT
+"""
+        (mobile / "surfing_template.yaml").write_text(surfing_tpl, encoding="utf-8")
+        app.get_shadowrocket_template_path().write_text(SHADOWROCKET_TEMPLATE, encoding="utf-8")
+
+        ytoo_sub = yaml.safe_dump({
+            "dns": {"enable": True, "nameserver": ["https://doh.pub/dns-query"], "proxy-server-nameserver": ["udp://127.0.0.1:1053"]},
+            "hosts": {
+                "a.163cdn-agent.net": "real-a.163cdn-agent.net",
+                "b.163cdn-agent.net": "real-b.163cdn-agent.net",
+            },
+            "proxies": [
+                {"name": "HK 01", "type": "anytls", "server": "a.163cdn-agent.net"},
+                {"name": "JP 01", "type": "anytls", "server": "b.163cdn-agent.net"},
+            ],
+        })
+        self.providers = [
+            {"name": "MESL", "url": "https://mesl.example/sub", "use_for_ai": False, "use_for_dns": True, "use_for_hosts": False},
+            {"name": "YToo", "url": "https://ytoo.example/sub", "use_for_ai": False, "use_for_dns": False, "use_for_hosts": True},
+        ]
+        self.save_providers()
+
+        def fake_download(provider, _ua=None):
+            if provider["name"] == "MESL":
+                return subscription(["node.mesl.example"], ["https://zone.rlose.com:39933/api-query"])
+            return ytoo_sub
+
+        with patch.object(app, "download_provider_subscription", side_effect=fake_download):
+            result = app.generate_mobile_config()
+
+        self.assertTrue(result["surfing"]["ok"], result)
+        self.assertEqual(result["hosts_policy_count"], 2)
+        surfing = yaml.safe_load((app.OPENCLASH_DIR.parent / "mobile" / "config.yaml").read_text(encoding="utf-8"))
+        self.assertEqual(surfing["hosts"], {
+            "*.local.test": "192.168.5.224",
+            "a.163cdn-agent.net": "real-a.163cdn-agent.net",
+            "b.163cdn-agent.net": "real-b.163cdn-agent.net",
+        })
+        self.assertEqual(surfing["dns"]["fake-ip-filter"], [
+            "*.local.test",
+            "a.163cdn-agent.net",
+            "b.163cdn-agent.net",
+            "real-a.163cdn-agent.net",
+            "real-b.163cdn-agent.net",
+        ])
+        self.assertEqual(surfing["dns"]["nameserver-policy"], {
+            "RULE-SET:CN_域": ["https://1.12.12.12:443/dns-query#🌐 本机·本地直连&h3=false"],
+            "real-a.163cdn-agent.net": [
+                "https://1.12.12.12:443/dns-query#🌐 本机·本地直连&h3=false",
+                "https://223.5.5.5:443/dns-query#🌐 本机·本地直连&h3=true",
+            ],
+            "real-b.163cdn-agent.net": [
+                "https://1.12.12.12:443/dns-query#🌐 本机·本地直连&h3=false",
+                "https://223.5.5.5:443/dns-query#🌐 本机·本地直连&h3=true",
+            ],
+        })
+        self.assertEqual(surfing["dns"]["proxy-server-nameserver-policy"], {
+            "node.mesl.example": ["https://zone.rlose.com:39933/api-query"],
+            "a.163cdn-agent.net": ["udp://127.0.0.1:1053"],
+            "b.163cdn-agent.net": ["udp://127.0.0.1:1053"],
+        })
+        shadowrocket = (app.OPENCLASH_DIR.parent / "mobile" / "shadowrocket.conf").read_text(encoding="utf-8")
+        self.assertNotIn("163cdn-agent.net", shadowrocket)
 
     def test_extract_dns_listen_port_handles_valid_and_invalid_values(self):
         self.assertEqual(app.extract_dns_listen_port({"listen": "0.0.0.0:7874"}), 7874)

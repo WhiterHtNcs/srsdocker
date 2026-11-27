@@ -2420,7 +2420,47 @@ def _extract_host_target_domains(incoming_hosts):
     return targets
 
 
-def _extract_direct_dns_resolvers(dns_config):
+def _extract_direct_proxy_names(config):
+    """Return names of proxies explicitly defined with type: direct in the template."""
+    if not isinstance(config, dict):
+        return set()
+    proxies = config.get("proxies")
+    if not isinstance(proxies, list):
+        return set()
+    return {
+        proxy["name"].strip()
+        for proxy in proxies
+        if isinstance(proxy, dict)
+        and proxy.get("type") == "direct"
+        and isinstance(proxy.get("name"), str)
+        and proxy["name"].strip()
+    }
+
+
+def _is_proxy_tagged_dns_resolver(resolver, direct_proxy_names=None):
+    """Return True if a DNS resolver routes through a non-direct proxy/group fragment."""
+    fragment = resolver.partition("#")[2].split("&", 1)[0]
+    if not fragment or "=" in fragment:
+        return False
+    allowed = {"DIRECT", "h3", "skip-cert-verify", "disable-ipv4", "disable-ipv6"}
+    if direct_proxy_names:
+        allowed |= direct_proxy_names
+    return fragment not in allowed
+
+
+def _nameserver_uses_proxy(dns_config, direct_proxy_names=None):
+    """Return True if dns.nameserver contains any entry routed through a proxy group."""
+    raw = dns_config.get("nameserver")
+    if not raw:
+        return False
+    items = [raw] if isinstance(raw, str) else (raw if isinstance(raw, list) else [])
+    return any(
+        isinstance(item, str) and item.strip() and _is_proxy_tagged_dns_resolver(item.strip(), direct_proxy_names)
+        for item in items
+    )
+
+
+def _extract_direct_dns_resolvers(dns_config, direct_proxy_names=None):
     """Return usable direct DNS resolvers from the template (excluding loopback and proxy-tagged entries)."""
     for field in ("proxy-server-nameserver", "nameserver", "default-nameserver"):
         raw = dns_config.get(field)
@@ -2434,10 +2474,7 @@ def _extract_direct_dns_resolvers(dns_config):
             cleaned = item.strip()
             if is_local_loopback_dns_resolver(cleaned):
                 continue
-            fragment = cleaned.partition("#")[2].split("&", 1)[0]
-            if fragment and "=" not in fragment and fragment not in {
-                "DIRECT", "h3", "skip-cert-verify", "disable-ipv4", "disable-ipv6"
-            }:
+            if _is_proxy_tagged_dns_resolver(cleaned, direct_proxy_names):
                 continue
             if cleaned not in direct:
                 direct.append(cleaned)
@@ -2483,6 +2520,7 @@ def merge_provider_hosts_policy(full_yaml, incoming_hosts):
     added_loopback_policy = False
     has_other_policy = False
     target_domains = _extract_host_target_domains(incoming_hosts)
+    direct_proxy_names = _extract_direct_proxy_names(config)
     if isinstance(dns, dict) and dns.get("enable") is True:
         # 1) Keep BOTH host keys and domain-type alias targets out of Fake-IP:
         #    Mihomo's withHosts middleware rewrites A -> B before withFakeIP runs,
@@ -2507,9 +2545,10 @@ def merge_provider_hosts_policy(full_yaml, incoming_hosts):
                 dns_modified = True
 
         # 2) Pin domain-type host targets to direct resolvers in nameserver-policy
-        #    when fallback is enabled so resolving them never triggers a proxy fallback loop.
-        if target_domains and dns.get("fallback"):
-            direct_resolvers = _extract_direct_dns_resolvers(dns)
+        #    when fallback is enabled or nameserver itself routes through a proxy group
+        #    (e.g. Surfing's #DNS连接) so resolving them never triggers a proxy loop.
+        if target_domains and (dns.get("fallback") or _nameserver_uses_proxy(dns, direct_proxy_names)):
+            direct_resolvers = _extract_direct_dns_resolvers(dns, direct_proxy_names)
             if direct_resolvers:
                 raw_ns_policy = dns.get("nameserver-policy")
                 if raw_ns_policy is None:
@@ -3195,7 +3234,7 @@ def get_shadowrocket_template_path():
     return get_surfing_template_path().with_name("shadowrocket_template.conf")
 
 
-def generate_surfing_config(proxy_providers_yaml, providers, dns_policy):
+def generate_surfing_config(proxy_providers_yaml, providers, dns_policy, hosts_policy=None):
     """Render the mobile template using the same subscriptions as OpenClash."""
     try:
         template = get_surfing_template_path().read_text(encoding="utf-8-sig")
@@ -3235,6 +3274,7 @@ def generate_surfing_config(proxy_providers_yaml, providers, dns_policy):
     rendered = template[:start] + "\n".join(provider_lines) + "\n" + template[provider_node.end_mark.index:]
     rendered = rendered.replace("use: __PROVIDER_NODES__", f"use: {dump_yaml_value(list(subscriptions))}")
     rendered = merge_provider_dns_policy(rendered, dns_policy)
+    rendered = merge_provider_hosts_policy(rendered, hosts_policy)
     config = validate_generated_openclash_config(rendered)
     for group in config.get("proxy-groups") or []:
         use = group.get("use", [])
@@ -3331,11 +3371,11 @@ def generate_shadowrocket_config(dns_policy):
     return {"ok": True, "path": str(output_path.relative_to(BASE_DIR))}
 
 
-def generate_mobile_outputs(proxy_providers_yaml, providers, dns_policy):
+def generate_mobile_outputs(proxy_providers_yaml, providers, dns_policy, hosts_policy=None):
     outputs = {}
     errors = []
     for name, generate, args in (
-        ("surfing", generate_surfing_config, (proxy_providers_yaml, providers, dns_policy)),
+        ("surfing", generate_surfing_config, (proxy_providers_yaml, providers, dns_policy, hosts_policy)),
         ("shadowrocket", generate_shadowrocket_config, (dns_policy,)),
     ):
         try:
@@ -3349,7 +3389,7 @@ def generate_mobile_outputs(proxy_providers_yaml, providers, dns_policy):
 
 
 def generate_mobile_config():
-    """Generate the mobile templates from one snapshot of the saved DNS policies."""
+    """Generate the mobile templates from one snapshot of the saved DNS/Hosts policies."""
     has_surfing = get_surfing_template_path().is_file()
     if not has_surfing and not get_shadowrocket_template_path().is_file():
         raise ValueError("找不到手机模板 config/mobile/surfing_template.yaml 或 shadowrocket_template.conf。")
@@ -3358,15 +3398,19 @@ def generate_mobile_config():
     proxy_providers_yaml = (
         generate_proxy_providers_yaml(providers, global_ua) if has_surfing and providers else ""
     )
-    dns_policy, dns_info = collect_provider_dns_policy(providers, global_ua)
+    if has_surfing:
+        dns_policy, hosts_policy, policy_info = collect_provider_subscription_policies(providers, global_ua)
+    else:
+        dns_policy, policy_info = collect_provider_dns_policy(providers, global_ua)
+        hosts_policy = {}
     with GENERATE_LOCK:
-        outputs, errors = generate_mobile_outputs(proxy_providers_yaml, providers, dns_policy)
+        outputs, errors = generate_mobile_outputs(proxy_providers_yaml, providers, dns_policy, hosts_policy)
     result = next((output for output in outputs.values() if output["ok"]), None)
     if result is None:
         if errors:
             raise errors[0]
         raise ValueError("找不到可用的手机模板。")
-    return {**result, **dns_info, **outputs}
+    return {**result, **policy_info, **outputs}
 
 
 def expand_clash_template(
@@ -3622,7 +3666,7 @@ def generate_full_openclash_config(rules_list=None, converted_rules=None):
             )
         except (OSError, ValueError) as error:
             clashmihomo_output = {"ok": False, "error": str(error)}
-        mobile_outputs, _ = generate_mobile_outputs(proxy_providers_yaml, providers, dns_policy)
+        mobile_outputs, _ = generate_mobile_outputs(proxy_providers_yaml, providers, dns_policy, hosts_policy)
 
     extra_outputs = dict(mobile_outputs)
     if clashmihomo_output is not None:
